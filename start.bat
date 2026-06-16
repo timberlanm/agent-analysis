@@ -23,11 +23,12 @@ if %errorlevel% neq 0 (
     pip install -r backend\requirements.txt
 )
 
-:: 检查前端依赖
+:: 检查前端依赖（使用本地缓存目录避免系统缓存权限问题）
 echo [2/4] 检查前端依赖...
 if not exist "frontend\node_modules\" (
     echo [INFO] 安装前端依赖...
     cd frontend
+    set npm_config_cache=.npm-cache
     call npm install
     cd ..
 )
