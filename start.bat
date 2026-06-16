@@ -48,12 +48,8 @@ echo.
 echo   按 Ctrl+C 停止服务
 echo ========================================
 
-start /b python backend\app.py --serve-frontend
-
-:: 等待后端启动后打开浏览器
-timeout /t 3 /nobreak >nul
+:: 后台打开浏览器
 start http://localhost:5000
 
-:: 保持窗口打开
-echo 服务运行中... 按任意键停止
-pause >nul
+:: 前台运行 Flask，Ctrl+C 可正常终止
+python backend\app.py --serve-frontend
