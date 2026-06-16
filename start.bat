@@ -24,7 +24,7 @@ if %errorlevel% neq 0 (
 )
 
 :: 检查前端依赖
-echo [2/3] 检查前端依赖...
+echo [2/4] 检查前端依赖...
 if not exist "frontend\node_modules\" (
     echo [INFO] 安装前端依赖...
     cd frontend
@@ -32,8 +32,14 @@ if not exist "frontend\node_modules\" (
     cd ..
 )
 
+:: 构建前端（必须，否则 Flask 托管源码浏览器无法运行）
+echo [3/4] 构建前端...
+cd frontend
+call npm run build
+cd ..
+
 :: 启动后端
-echo [3/3] 启动服务...
+echo [4/4] 启动服务...
 echo.
 echo   后端 API: http://localhost:5000
 echo   前端页面: http://localhost:5000
