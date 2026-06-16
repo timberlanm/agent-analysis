@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Node / Frontend
+node_modules/
+dist/
+.cache/
+.parcel-cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Runtime data (uploaded attachments, SQLite DB)
+backend/uploads/
+backend/data/
+
+# CodeBuddy
+.codebuddy/
+
+# Logs
+*.log
+flask.log
+flask_err.log

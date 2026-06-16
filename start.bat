@@ -1,0 +1,52 @@
+@echo off
+chcp 65001 >nul
+title 研判分析工作台
+
+echo ========================================
+echo   研判分析工作台
+echo ========================================
+echo.
+
+:: 检查 Python
+python --version >nul 2>&1
+if %errorlevel% neq 0 (
+    echo [ERROR] 未找到 Python，请先安装 Python 3.8+
+    pause
+    exit /b 1
+)
+
+:: 检查依赖
+echo [1/3] 检查 Python 依赖...
+pip show Flask >nul 2>&1
+if %errorlevel% neq 0 (
+    echo [INFO] 安装 Python 依赖...
+    pip install -r backend\requirements.txt
+)
+
+:: 检查前端依赖
+echo [2/3] 检查前端依赖...
+if not exist "frontend\node_modules\" (
+    echo [INFO] 安装前端依赖...
+    cd frontend
+    call npm install
+    cd ..
+)
+
+:: 启动后端
+echo [3/3] 启动服务...
+echo.
+echo   后端 API: http://localhost:5000
+echo   前端页面: http://localhost:5000
+echo.
+echo   按 Ctrl+C 停止服务
+echo ========================================
+
+start /b python backend\app.py --serve-frontend
+
+:: 等待后端启动后打开浏览器
+timeout /t 3 /nobreak >nul
+start http://localhost:5000
+
+:: 保持窗口打开
+echo 服务运行中... 按任意键停止
+pause >nul
