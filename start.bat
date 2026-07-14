@@ -1,5 +1,6 @@
 @echo off
 chcp 65001 >nul
+cd /d "%~dp0"
 title 研判分析工作台
 
 echo ========================================
@@ -33,7 +34,7 @@ if "%REBUILD%"=="1" goto :build_yes
 if not exist "frontend\dist\index.html" goto :build_yes
 where powershell >nul 2>&1
 if %errorlevel% neq 0 goto :build_yes
-powershell -NoProfile -Command "try { $d=(Get-Item 'frontend\dist\index.html').LastWriteTimeUtc; $m=(Get-ChildItem -Recurse -File 'frontend\src' -ErrorAction SilentlyContinue | Measure-Object -Property LastWriteTimeUtc -Maximum).Maximum; if ($m -gt $d) { exit 1 } else { exit 0 } } catch { exit 1 }"
+powershell -NoProfile -ExecutionPolicy Bypass -File "scripts\need-build.ps1"
 if %errorlevel% neq 0 goto :build_yes
 goto :build_check_done
 :build_yes

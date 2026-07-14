@@ -1,0 +1,26 @@
+# 统一换行符，避免跨机器 checkout 破坏批处理/脚本解析
+* text=auto
+
+# Windows 脚本必须用 CRLF，否则 cmd.exe 解析 goto/标签会错乱
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+
+# Unix 脚本用 LF
+*.sh   text eol=lf
+
+# 二进制资源：禁止任何行尾/编码转换（否则会损坏）
+*.png      binary
+*.jpg      binary
+*.jpeg     binary
+*.gif      binary
+*.ico      binary
+*.webp     binary
+*.db       binary
+*.sqlite   binary
+*.sqlite3  binary
+*.pcap     binary
+*.pcapng   binary
+*.zip      binary
+*.gz       binary
+*.7z       binary
