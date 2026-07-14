@@ -1,3 +1,10 @@
 Flask==2.3.3
 flask-cors==4.0.0
 pyyaml==6.0.1
+
+# 可选：截图 OCR 识别（「从截图识别字段」功能）。
+# 未安装时该功能优雅降级——接口返回安装指引，不影响其余功能。
+# 本地离线运行、无需大模型；安装后重启后端即生效。
+# 网络访问 PyPI 慢时可加国内镜像，例如：
+#   pip install rapidocr-onnxruntime -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com
+rapidocr-onnxruntime==1.4.4

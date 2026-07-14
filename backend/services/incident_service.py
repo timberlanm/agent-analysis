@@ -51,14 +51,6 @@ COMPRESSED_MAGIC_HEADERS = {
 
 DEFAULT_ACTOR = "operator"
 
-SLA_POLICIES = {
-    "critical": {"response_minutes": 15, "resolution_minutes": 120},
-    "high": {"response_minutes": 30, "resolution_minutes": 240},
-    "medium": {"response_minutes": 240, "resolution_minutes": 1440},
-    "low": {"response_minutes": 1440, "resolution_minutes": 4320},
-    "info": {"response_minutes": 4320, "resolution_minutes": 10080},
-}
-
 ACTIVE_STATUSES = {
     "new",
     "pending",
@@ -98,26 +90,35 @@ CORRELATION_FIELD_WEIGHTS = {
 }
 
 STATUS_VALUES = {
-    "new": "新建",
-    "pending": "待研判",
+    "new": "新建中",
+    "pending": "待分配",
     "assigned": "已分派",
     "triaging": "初筛中",
     "investigating": "研判中",
+    "responding": "应急响应中",
     "need_info": "待补充信息",
     "waiting_info": "待补充信息",
     "confirmed": "已确认",
-    "closed": "已关闭",
+    "closed": "已完成",
     "escalated": "已升级事件",
 }
 
 CONCLUSION_VALUES = {
-    "true_positive": "真实攻击",
-    "suspicious": "疑似攻击",
-    "false_positive": "误报",
-    "duplicate": "重复告警",
+    "false_positive": "告警误报",
     "business": "正常业务",
+    "true_positive": "真实攻击",
+    "incident": "安全事件",
     "unknown": "无法确认",
 }
+
+# 事件类结论（与「应急响应中」语义兼容：进入 responding 不会被一致性规则作废）
+INCIDENT_CONCLUSIONS = {"true_positive", "incident"}
+# 仅这些结论会「自动」转入应急响应。真实攻击(未必成规模，如未遂)不自动跳，
+# 留在研判中，需要时人工转应急或直接挂处置子任务(如封禁 IP)。
+AUTO_RESPONDING_CONCLUSIONS = {"incident"}
+
+# 应急响应处置子任务状态（轻量：待处理/处理中/已完成）
+SUBTASK_STATUS_VALUES = {"todo": "待处理", "doing": "处理中", "done": "已完成"}
 
 SEVERITY_VALUES = {"critical", "high", "medium", "low", "info"}
 
@@ -245,62 +246,6 @@ def _parse_time(value: Any) -> Optional[datetime]:
         return None
 
 
-def _sla_info(item: Dict[str, Any]) -> Dict[str, Any]:
-    severity = item.get("severity") or "medium"
-    policy = SLA_POLICIES.get(severity, SLA_POLICIES["medium"])
-    status = item.get("status") or "pending"
-    created_at = _parse_time(item.get("created_at") or item.get("discovered_at"))
-    if not created_at:
-        return {
-            "stage": "unknown",
-            "status": "unknown",
-            "label": "未知",
-            "due_at": "",
-            "remaining_seconds": None,
-            "is_overdue": False,
-        }
-
-    if status in CLOSED_STATUSES:
-        stage = "closed"
-        due_at = created_at + timedelta(minutes=policy["resolution_minutes"])
-    elif status in {"new", "pending", "assigned"}:
-        stage = "response"
-        due_at = created_at + timedelta(minutes=policy["response_minutes"])
-    else:
-        stage = "resolution"
-        due_at = created_at + timedelta(minutes=policy["resolution_minutes"])
-
-    now = datetime.now(timezone.utc)
-    remaining = int((due_at - now).total_seconds())
-    if status in CLOSED_STATUSES:
-        sla_status = "done"
-        label = "已完成"
-        is_overdue = False
-    elif remaining < 0:
-        sla_status = "overdue"
-        label = "已超时"
-        is_overdue = True
-    elif remaining <= 30 * 60:
-        sla_status = "warning"
-        label = "即将超时"
-        is_overdue = False
-    else:
-        sla_status = "normal"
-        label = "正常"
-        is_overdue = False
-
-    return {
-        "stage": stage,
-        "status": sla_status,
-        "label": label,
-        "due_at": due_at.isoformat(),
-        "remaining_seconds": remaining,
-        "is_overdue": is_overdue,
-        "response_minutes": policy["response_minutes"],
-        "resolution_minutes": policy["resolution_minutes"],
-    }
-
-
 def _correlation_level(score: int) -> str:
     if score >= 90:
         return "strong"
@@ -416,7 +361,9 @@ def init_db() -> None:
                 discovered_at TEXT,
                 description TEXT,
                 key_evidence TEXT,
+                evidence_info TEXT,
                 handling_suggestion TEXT,
+                handlers TEXT,
                 raw_content TEXT,
                 normalized_fields TEXT,
                 created_at TEXT NOT NULL,
@@ -495,6 +442,21 @@ def init_db() -> None:
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS subtasks (
+                id TEXT PRIMARY KEY,
+                alert_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                team TEXT,
+                assignee TEXT,
+                status TEXT NOT NULL DEFAULT 'todo',
+                due_at TEXT,
+                round INTEGER NOT NULL DEFAULT 1,
+                created_by TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(alert_id) REFERENCES alerts(id) ON DELETE CASCADE
+            );
+
             CREATE INDEX IF NOT EXISTS idx_alerts_updated_at ON alerts(updated_at DESC);
             CREATE INDEX IF NOT EXISTS idx_alerts_status ON alerts(status);
             CREATE INDEX IF NOT EXISTS idx_alerts_severity ON alerts(severity);
@@ -502,6 +464,7 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_attachments_alert ON attachments(alert_id);
             CREATE INDEX IF NOT EXISTS idx_assignment_alert ON assignment_logs(alert_id);
             CREATE INDEX IF NOT EXISTS idx_escalation_alert ON escalation_records(alert_id);
+            CREATE INDEX IF NOT EXISTS idx_subtasks_alert ON subtasks(alert_id);
             """
         )
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(alerts)")}
@@ -511,14 +474,25 @@ def init_db() -> None:
             )
         if "key_evidence" not in columns:
             conn.execute("ALTER TABLE alerts ADD COLUMN key_evidence TEXT")
+        if "evidence_info" not in columns:
+            conn.execute("ALTER TABLE alerts ADD COLUMN evidence_info TEXT")
         if "handling_suggestion" not in columns:
             conn.execute("ALTER TABLE alerts ADD COLUMN handling_suggestion TEXT")
+        if "handlers" not in columns:
+            conn.execute("ALTER TABLE alerts ADD COLUMN handlers TEXT")
+        if "round" not in columns:
+            conn.execute("ALTER TABLE alerts ADD COLUMN round INTEGER NOT NULL DEFAULT 1")
+        note_columns = {row["name"] for row in conn.execute("PRAGMA table_info(notes)")}
+        if "round" not in note_columns:
+            conn.execute("ALTER TABLE notes ADD COLUMN round INTEGER NOT NULL DEFAULT 1")
 
 
 def _row_to_alert(row: sqlite3.Row) -> Dict[str, Any]:
     item = dict(row)
     item["raw_content"] = _json_loads(item.get("raw_content"), {})
     item["normalized_fields"] = _json_loads(item.get("normalized_fields"), {})
+    item["handlers"] = _json_loads(item.get("handlers"), [])
+    item["round"] = int(item.get("round") or 1)
     item["status_label"] = STATUS_VALUES.get(item.get("status"), item.get("status"))
     item["conclusion_label"] = CONCLUSION_VALUES.get(item.get("conclusion"), item.get("conclusion") or "")
     item["source"] = item.get("source_system") or ""
@@ -531,7 +505,6 @@ def _row_to_alert(row: sqlite3.Row) -> Dict[str, Any]:
     item["source_category_label"] = ALERT_SOURCE_TEMPLATES.get(
         item["source_category"], ALERT_SOURCE_TEMPLATES["other"]
     )["label"]
-    item["sla"] = _sla_info(item)
     return item
 
 
@@ -550,11 +523,13 @@ def _row_to_note(row: sqlite3.Row) -> Dict[str, Any]:
     return dict(row)
 
 
+def _row_to_subtask(row: sqlite3.Row) -> Dict[str, Any]:
+    item = dict(row)
+    item["status_label"] = SUBTASK_STATUS_VALUES.get(item.get("status"), item.get("status"))
+    return item
+
+
 def _row_to_assignment(row: sqlite3.Row) -> Dict[str, Any]:
-    return dict(row)
-
-
-def _row_to_escalation(row: sqlite3.Row) -> Dict[str, Any]:
     return dict(row)
 
 
@@ -889,7 +864,7 @@ def list_alerts(filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]
         clauses.append(f"status NOT IN ({','.join(['?'] * len(CLOSED_STATUSES))})")
         params.extend(sorted(CLOSED_STATUSES))
     elif queue == "unassigned":
-        clauses.append("(owner IS NULL OR owner = '')")
+        clauses.append("(handlers IS NULL OR handlers = '' OR handlers = '[]')")
         clauses.append(f"status NOT IN ({','.join(['?'] * len(CLOSED_STATUSES))})")
         params.extend(sorted(CLOSED_STATUSES))
     elif queue == "active":
@@ -898,9 +873,6 @@ def list_alerts(filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]
     elif queue == "closed":
         clauses.append("status = ?")
         params.append("closed")
-    elif queue == "escalated":
-        clauses.append("status = ?")
-        params.append("escalated")
 
     keyword = filters.get("keyword")
     if keyword:
@@ -913,7 +885,7 @@ def list_alerts(filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     limit = int(filters.get("limit") or 200)
     offset = int(filters.get("offset") or 0)
-    db_limit = 10000 if queue == "overdue" else limit
+    db_limit = limit
 
     with _conn() as conn:
         rows = conn.execute(
@@ -928,9 +900,6 @@ def list_alerts(filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]
             alert["attachment_count"] = conn.execute(
                 "SELECT count(*) AS c FROM attachments WHERE alert_id = ?", (alert["id"],)
             ).fetchone()["c"]
-    if queue == "overdue":
-        alerts = [alert for alert in alerts if alert.get("sla", {}).get("is_overdue")]
-        alerts = alerts[:limit]
     return alerts
 
 
@@ -960,17 +929,17 @@ def get_alert(alert_id: str) -> Optional[Dict[str, Any]]:
                 (alert_id,),
             )
         ]
-        alert["escalations"] = [
-            _row_to_escalation(r)
-            for r in conn.execute(
-                "SELECT * FROM escalation_records WHERE alert_id = ? ORDER BY created_at DESC",
-                (alert_id,),
-            )
-        ]
         alert["audit"] = [
             _row_to_audit(r)
             for r in conn.execute(
                 "SELECT * FROM audit_logs WHERE target_id = ? ORDER BY created_at DESC LIMIT 100",
+                (alert_id,),
+            )
+        ]
+        alert["subtasks"] = [
+            _row_to_subtask(r)
+            for r in conn.execute(
+                "SELECT * FROM subtasks WHERE alert_id = ? ORDER BY created_at ASC",
                 (alert_id,),
             )
         ]
@@ -982,6 +951,45 @@ def get_alert(alert_id: str) -> Optional[Dict[str, Any]]:
         alert["correlation"] = correlation
         alert["related"] = correlation["related_alerts"]
         return alert
+
+
+_EDIT_FIELD_LABELS = {
+    "title": "告警名称",
+    "source_category": "安全设备类型",
+    "source_system": "设备名称",
+    "alert_type": "告警类型",
+}
+_EDIT_NF_LABELS = {
+    "source_ip": "攻击IP", "destination_ip": "被攻击IP", "hostname": "主机名",
+    "username": "用户名", "domain": "域名", "url": "URL", "file_hash": "文件Hash",
+    "file_path": "文件路径", "process_name": "进程名", "command_line": "命令行",
+    "rule_name": "规则名称", "rule_id": "规则ID", "protocol": "协议",
+    "http_method": "HTTP方法", "http_status": "响应状态", "user_agent": "UA",
+    "event_action": "检测动作", "source_port": "源端口", "destination_port": "目的端口",
+}
+
+
+def _short_val(value: Any, limit: int = 40) -> str:
+    text = str(value or "")
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def _diff_edit_fields(before: Dict[str, Any], after: Dict[str, Any]) -> List[str]:
+    """比较可编辑内容字段，返回变更描述列表（用于编辑留痕）。"""
+    changes: List[str] = []
+    for key, label in _EDIT_FIELD_LABELS.items():
+        b, a = str(before.get(key) or ""), str(after.get(key) or "")
+        if b != a:
+            changes.append(f"{label}：{_short_val(b) or '空'} → {_short_val(a) or '空'}")
+    bnf = before.get("normalized_fields") or {}
+    anf = after.get("normalized_fields") or {}
+    for key, label in _EDIT_NF_LABELS.items():
+        b, a = str(bnf.get(key) or ""), str(anf.get(key) or "")
+        if b != a:
+            changes.append(f"{label}：{_short_val(b) or '空'} → {_short_val(a) or '空'}")
+    if str(before.get("description") or "") != str(after.get("description") or ""):
+        changes.append("告警详情已更新")
+    return changes
 
 
 def update_alert(alert_id: str, data: Dict[str, Any], actor: str = DEFAULT_ACTOR) -> Optional[Dict[str, Any]]:
@@ -996,12 +1004,12 @@ def update_alert(alert_id: str, data: Dict[str, Any], actor: str = DEFAULT_ACTOR
         "status",
         "conclusion",
         "close_reason",
-        "owner",
         "created_by",
         "occurred_at",
         "discovered_at",
         "description",
         "key_evidence",
+        "evidence_info",
         "handling_suggestion",
     }
     before = get_alert(alert_id)
@@ -1022,6 +1030,8 @@ def update_alert(alert_id: str, data: Dict[str, Any], actor: str = DEFAULT_ACTOR
     for key in [
         "source_ip",
         "destination_ip",
+        "source_port",
+        "destination_port",
         "hostname",
         "username",
         "domain",
@@ -1040,6 +1050,13 @@ def update_alert(alert_id: str, data: Dict[str, Any], actor: str = DEFAULT_ACTOR
     ]:
         if key in data:
             normalized[key] = data.get(key) or ""
+    # 自定义字段：允许写入任意键名（研判员从原文补充的非标准字段）
+    custom_fields = data.get("custom_fields")
+    if isinstance(custom_fields, dict):
+        for raw_key, raw_val in custom_fields.items():
+            k = str(raw_key).strip()
+            if k:
+                normalized[k] = "" if raw_val is None else str(raw_val)
     if normalized != before.get("normalized_fields"):
         updates.append("normalized_fields = ?")
         params.append(_json_dumps(normalized))
@@ -1058,27 +1075,27 @@ def update_alert(alert_id: str, data: Dict[str, Any], actor: str = DEFAULT_ACTOR
                 _insert_entity(conn, alert_id, entity)
 
     after = get_alert(alert_id)
-    if "owner" in data and (before.get("owner") or "") != (after.get("owner") or ""):
-        from_owner = before.get("owner") or ""
-        to_owner = after.get("owner") or ""
-        _record_assignment(alert_id, actor, from_owner, to_owner)
-        add_note(
-            alert_id,
-            f"告警分派：{from_owner or '未分派'} -> {to_owner or '未分派'}，分派人：{actor}",
-            "assignment",
-            actor,
-            audit=False,
-        )
-        _audit(
-            "assign_alert",
-            "alert",
-            alert_id,
-            actor,
-            before={"owner": from_owner},
-            after={"from_owner": from_owner, "to_owner": to_owner, "assigned_by": actor},
-        )
-        after = get_alert(alert_id)
-    _audit("update_alert", "alert", alert_id, actor, before=before, after=after)
+    _audit(
+        "update_alert",
+        "alert",
+        alert_id,
+        actor,
+        before={
+            "status": before.get("status"),
+            "conclusion": before.get("conclusion"),
+        },
+        after={
+            "status": after.get("status"),
+            "status_label": after.get("status_label"),
+            "conclusion": after.get("conclusion"),
+            "conclusion_label": after.get("conclusion_label"),
+            "title": after.get("title"),
+        },
+    )
+    # Step 1 编辑留痕：内容字段发生变更时写入流转记录
+    edit_changes = _diff_edit_fields(before, after)
+    if edit_changes:
+        add_note(alert_id, "编辑告警信息：" + "；".join(edit_changes), "edit", actor, audit=False)
     return after
 
 
@@ -1109,7 +1126,7 @@ def batch_update_alerts(
             if action == "assign":
                 owner = str(payload.get("owner") or "").strip()
                 if not owner:
-                    raise ValueError("批量分派需要指定责任人")
+                    raise ValueError("批量分派需要指定处理人")
                 result = update_alert(alert_id, {"owner": owner, "status": "assigned"}, actor)
             elif action == "status":
                 status = str(payload.get("status") or "").strip()
@@ -1412,16 +1429,18 @@ def add_note(
 ) -> Optional[Dict[str, Any]]:
     if not content.strip():
         raise ValueError("研判记录不能为空")
-    if not get_alert(alert_id):
+    alert = get_alert(alert_id)
+    if not alert:
         return None
+    note_round = int(alert.get("round") or 1)
     note_id = _id("not_")
     with _conn() as conn:
         conn.execute(
             """
-            INSERT INTO notes (id, alert_id, author, note_type, content, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO notes (id, alert_id, author, note_type, content, round, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (note_id, alert_id, author, note_type, content.strip(), _now()),
+            (note_id, alert_id, author, note_type, content.strip(), note_round, _now()),
         )
         conn.execute("UPDATE alerts SET updated_at = ?, updated_by = ? WHERE id = ?", (_now(), author, alert_id))
         row = conn.execute("SELECT * FROM notes WHERE id = ?", (note_id,)).fetchone()
@@ -1437,6 +1456,9 @@ def set_status(alert_id: str, status: str, actor: str = DEFAULT_ACTOR, reason: s
     before = get_alert(alert_id)
     if not before:
         return None
+    # 已完成告警不允许直接改状态回跳；重开必须走「重新指派」或「驳回重判」
+    if before.get("status") == "closed" and status != "closed":
+        raise ValueError("已完成告警不能直接改状态，请用『重新指派』或『驳回重判』重开")
     update_data = {"status": status}
     note_reason = ""
     if status == "closed":
@@ -1447,29 +1469,50 @@ def set_status(alert_id: str, status: str, actor: str = DEFAULT_ACTOR, reason: s
             handling_suggestion = str(reason.get("handling_suggestion") or "").strip()
         else:
             close_reason = str(reason or "").strip()
-            conclusion = str(before.get("conclusion") or "").strip()
-            key_evidence = str(before.get("key_evidence") or "").strip()
-            handling_suggestion = str(before.get("handling_suggestion") or "").strip()
-        if not conclusion:
-            raise ValueError("关闭告警前必须填写研判结论")
-        if conclusion not in CONCLUSION_VALUES:
+            conclusion = key_evidence = handling_suggestion = ""
+        # 完成门控：研判依据（含举证）/ 处置建议 两项必须非空
+        eff_ke = key_evidence or str(before.get("key_evidence") or "").strip()
+        eff_hs = handling_suggestion or str(before.get("handling_suggestion") or "").strip()
+        missing = []
+        if not eff_ke:
+            missing.append("研判依据")
+        if not eff_hs:
+            missing.append("处置建议")
+        if missing:
+            raise ValueError("完成前请补全：" + "、".join(missing))
+        # 仅更新显式提供的字段，保留原有结论/依据，完成告警不强制填写
+        if conclusion and conclusion not in CONCLUSION_VALUES:
             raise ValueError("结论值无效")
-        if not close_reason:
-            raise ValueError("关闭告警前必须填写关闭原因")
-        if not key_evidence:
-            raise ValueError("关闭告警前必须填写关键依据")
-        update_data.update({
-            "conclusion": conclusion,
-            "close_reason": close_reason,
-            "key_evidence": key_evidence,
-            "handling_suggestion": handling_suggestion,
-        })
+        if conclusion:
+            update_data["conclusion"] = conclusion
+        if key_evidence:
+            update_data["key_evidence"] = key_evidence
+        if handling_suggestion:
+            update_data["handling_suggestion"] = handling_suggestion
+        if close_reason:
+            update_data["close_reason"] = close_reason
         note_reason = close_reason
     else:
         update_data["close_reason"] = ""
         note_reason = str(reason or "")
+    # 结论-状态一致性（软处理）：进入「应急响应中」时，作废与之矛盾的
+    # 非事件类结论（误报/正常业务/无法确认）→ 置为「未定」，留待重新研判。
+    reconciled_from = ""
+    if status == "responding":
+        prev_conclusion = str(before.get("conclusion") or "").strip()
+        if prev_conclusion and prev_conclusion not in INCIDENT_CONCLUSIONS:
+            update_data["conclusion"] = ""
+            reconciled_from = CONCLUSION_VALUES.get(prev_conclusion, prev_conclusion)
     updated = update_alert(alert_id, update_data, actor)
     add_note(alert_id, f"状态变更：{before.get('status_label')} -> {STATUS_VALUES[status]}{('，原因：' + note_reason) if note_reason else ''}", "status_change", actor, audit=False)
+    if reconciled_from:
+        add_note(
+            alert_id,
+            f"因转入「应急响应中」，原研判结论「{reconciled_from}」与应急处置状态不一致，已作废为「未定」，请重新研判定性。",
+            "conclusion",
+            actor,
+            audit=False,
+        )
     return updated
 
 
@@ -1481,68 +1524,273 @@ def set_conclusion(
 ) -> Optional[Dict[str, Any]]:
     if conclusion and conclusion not in CONCLUSION_VALUES:
         raise ValueError("结论值无效")
-    updated = update_alert(alert_id, {"conclusion": conclusion}, actor)
-    if updated:
-        label = CONCLUSION_VALUES.get(conclusion, conclusion)
-        add_note(alert_id, f"研判结论：{label}{('。' + content) if content else ''}", "conclusion", actor, audit=False)
-    return updated
-
-
-def escalate_alert(alert_id: str, payload: Dict[str, Any], actor: str = DEFAULT_ACTOR) -> Optional[Dict[str, Any]]:
     before = get_alert(alert_id)
     if not before:
         return None
-    target_team = str(payload.get("target_team") or "").strip()
-    reason = str(payload.get("reason") or "").strip()
-    action_required = str(payload.get("action_required") or "").strip()
-    severity = str(payload.get("severity") or before.get("severity") or "high").strip()
-    due_at = str(payload.get("due_at") or "").strip()
-    if not target_team:
-        raise ValueError("升级事件需要指定接收团队")
-    if not reason:
-        raise ValueError("升级事件需要填写升级原因")
-    if severity not in SEVERITY_VALUES:
-        raise ValueError("升级等级无效")
+    updated = update_alert(alert_id, {"conclusion": conclusion}, actor)
+    if updated and conclusion:
+        label = CONCLUSION_VALUES.get(conclusion, conclusion)
+        add_note(alert_id, f"研判结论：{label}{('。' + content) if content else ''}", "conclusion", actor, audit=False)
+        # 仅「安全事件」自动转入应急响应处置（非终态时）；真实攻击不自动跳，留在研判中
+        if conclusion in AUTO_RESPONDING_CONCLUSIONS and before.get("status") not in ("closed", "responding"):
+            updated = set_status(alert_id, "responding", actor, "研判结论为安全事件，自动转应急响应处置")
+    return updated
 
-    record_id = _id("esc_")
+
+def assign_handler(alert_id: str, name: str, actor: str = DEFAULT_ACTOR) -> Optional[Dict[str, Any]]:
+    name = (name or "").strip()
+    if not name:
+        raise ValueError("处理人不能为空")
+    before = get_alert(alert_id)
+    if not before:
+        return None
+    handlers = list(before.get("handlers") or [])
+    if name in handlers:
+        return before
+    handlers.append(name)
     with _conn() as conn:
         conn.execute(
-            """
-            INSERT INTO escalation_records
-            (id, alert_id, escalated_by, target_team, severity, reason, action_required, due_at, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (record_id, alert_id, actor, target_team, severity, reason, action_required, due_at, _now()),
+            "UPDATE alerts SET handlers = ?, updated_at = ? WHERE id = ?",
+            (_json_dumps(handlers), _now(), alert_id),
         )
+    add_note(alert_id, f"指派处理人：{name}（指派人：{actor}）", "assignment", actor, audit=False)
+    _audit("assign_handler", "alert", alert_id, actor, after={"handler": name, "handlers": handlers})
+    return get_alert(alert_id)
 
-    update_data = {"status": "escalated", "severity": severity}
-    if not before.get("conclusion"):
-        update_data["conclusion"] = "suspicious"
-    after = update_alert(alert_id, update_data, actor)
+
+def remove_handler(alert_id: str, name: str, actor: str = DEFAULT_ACTOR) -> Optional[Dict[str, Any]]:
+    name = (name or "").strip()
+    before = get_alert(alert_id)
+    if not before:
+        return None
+    handlers = [h for h in (before.get("handlers") or []) if h != name]
+    with _conn() as conn:
+        conn.execute(
+            "UPDATE alerts SET handlers = ?, updated_at = ? WHERE id = ?",
+            (_json_dumps(handlers), _now(), alert_id),
+        )
+    add_note(alert_id, f"移除处理人：{name}（操作人：{actor}）", "assignment", actor, audit=False)
+    return get_alert(alert_id)
+
+
+def set_handlers(alert_id: str, names: Any, actor: str = DEFAULT_ACTOR) -> Optional[Dict[str, Any]]:
+    before = get_alert(alert_id)
+    if not before:
+        return None
+    old = list(before.get("handlers") or [])
+    new: List[str] = []
+    for n in names or []:
+        n = str(n).strip()
+        if n and n not in new:
+            new.append(n)
+    with _conn() as conn:
+        conn.execute(
+            "UPDATE alerts SET handlers = ?, updated_at = ? WHERE id = ?",
+            (_json_dumps(new), _now(), alert_id),
+        )
+    for n in new:
+        if n not in old:
+            add_note(alert_id, f"指派处理人：{n}（指派人：{actor}）", "assignment", actor, audit=False)
+    for n in old:
+        if n not in new:
+            add_note(alert_id, f"移除处理人：{n}（操作人：{actor}）", "assignment", actor, audit=False)
+    _audit("set_handlers", "alert", alert_id, actor, before={"handlers": old}, after={"handlers": new})
+    # 指派后自动流转
+    prev_status = before.get("status")
+    if new:
+        if prev_status == "pending":
+            # 待分配 -> 研判中（处理人已接手研判）
+            set_status(alert_id, "investigating", actor, "指派处理人后自动进入研判")
+        elif prev_status == "closed":
+            # 已完成告警重新指派 -> 清空重启：清空结论+三项快照，带入新处理人进入研判中
+            new_round = int(before.get("round") or 1) + 1
+            with _conn() as conn:
+                conn.execute(
+                    "UPDATE alerts SET status = 'investigating', conclusion = '', close_reason = '', "
+                    "key_evidence = '', evidence_info = '', handling_suggestion = '', round = ?, "
+                    "updated_at = ?, updated_by = ? WHERE id = ?",
+                    (new_round, _now(), actor, alert_id),
+                )
+            add_note(
+                alert_id,
+                f"重新指派并重开研判：开启第 {new_round} 轮，清空原结论与研判/处置信息"
+                f"（历史留存于记录），进入研判中",
+                "status_change",
+                actor,
+                audit=False,
+            )
+    return get_alert(alert_id)
+
+
+def reject_alert(alert_id: str, reason: str = "", actor: str = DEFAULT_ACTOR) -> Optional[Dict[str, Any]]:
+    """驳回已完成告警，清空重启回待分配：清空结论 / 处理人 / 三项快照，round+1，仅保留流转记录。"""
+    before = get_alert(alert_id)
+    if not before:
+        return None
+    if before.get("status") != "closed":
+        raise ValueError("仅「已完成」的告警可驳回重判")
+    reason = str(reason or "").strip()
+    new_round = int(before.get("round") or 1) + 1
+    with _conn() as conn:
+        conn.execute(
+            "UPDATE alerts SET status = 'pending', conclusion = '', close_reason = '', "
+            "handlers = '[]', key_evidence = '', evidence_info = '', handling_suggestion = '', "
+            "round = ?, updated_at = ?, updated_by = ? WHERE id = ?",
+            (new_round, _now(), actor, alert_id),
+        )
+    # 记录归入新一轮（add_note 依据当前 round 打标）
     add_note(
         alert_id,
-        f"升级事件：接收团队 {target_team}，等级 {severity}，原因：{reason}"
-        + (f"，处置要求：{action_required}" if action_required else ""),
-        "escalation",
+        f"驳回重判：开启第 {new_round} 轮，清空结论 / 处理人 / 研判/处置信息，回退至「待分配」"
+        f"（历史留存于记录）{('。驳回原因：' + reason) if reason else ''}（驳回人：{actor}）",
+        "status_change",
         actor,
         audit=False,
     )
     _audit(
-        "escalate_alert",
+        "reject_alert",
         "alert",
         alert_id,
         actor,
-        before={"status": before.get("status"), "severity": before.get("severity")},
-        after={
-            "record_id": record_id,
-            "target_team": target_team,
-            "severity": severity,
-            "reason": reason,
-            "action_required": action_required,
-            "due_at": due_at,
-        },
+        before={"status": before.get("status"), "conclusion": before.get("conclusion"), "round": before.get("round")},
+        after={"status": "pending", "conclusion": "", "round": new_round},
     )
-    return get_alert(alert_id) if after else None
+    return get_alert(alert_id)
+
+
+def reopen_alert(
+    alert_id: str,
+    conclusion: str,
+    actor: str = DEFAULT_ACTOR,
+    reason: str = "",
+) -> Optional[Dict[str, Any]]:
+    """重新研判已完成告警：直接改判结论并重开，round+1、保留当前处理人。
+    事件类结论进「应急响应中」，其余进「研判中」。研判三项快照不在此清空，
+    由前端归档软清空（旧内容进研判记录，处置建议失效、依据/举证待复核）。"""
+    if not conclusion or conclusion not in CONCLUSION_VALUES:
+        raise ValueError("请选择有效的研判结论")
+    before = get_alert(alert_id)
+    if not before:
+        return None
+    if before.get("status") != "closed":
+        raise ValueError("仅「已完成」的告警可重新研判")
+    new_round = int(before.get("round") or 1) + 1
+    new_status = "responding" if conclusion in AUTO_RESPONDING_CONCLUSIONS else "investigating"
+    reason = str(reason or "").strip()
+    with _conn() as conn:
+        conn.execute(
+            "UPDATE alerts SET status = ?, conclusion = ?, close_reason = '', round = ?, "
+            "updated_at = ?, updated_by = ? WHERE id = ?",
+            (new_status, conclusion, new_round, _now(), actor, alert_id),
+        )
+    label = CONCLUSION_VALUES.get(conclusion, conclusion)
+    add_note(
+        alert_id,
+        f"重新研判：开启第 {new_round} 轮，改判为「{label}」，保留当前处理人，进入「{STATUS_VALUES[new_status]}」"
+        f"{('。原因：' + reason) if reason else ''}（操作人：{actor}）",
+        "status_change",
+        actor,
+        audit=False,
+    )
+    _audit(
+        "reopen_alert",
+        "alert",
+        alert_id,
+        actor,
+        before={"status": "closed", "conclusion": before.get("conclusion"), "round": before.get("round")},
+        after={"status": new_status, "conclusion": conclusion, "round": new_round},
+    )
+    return get_alert(alert_id)
+
+
+def list_subtasks(alert_id: str) -> List[Dict[str, Any]]:
+    init_db()
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM subtasks WHERE alert_id = ? ORDER BY created_at ASC", (alert_id,)
+        ).fetchall()
+    return [_row_to_subtask(r) for r in rows]
+
+
+def create_subtask(alert_id: str, data: Dict[str, Any], actor: str = DEFAULT_ACTOR) -> Optional[Dict[str, Any]]:
+    """新增应急处置子任务（轻量）：标题必填，团队/负责人/状态可选，关联当前研判轮次。"""
+    alert = get_alert(alert_id)
+    if not alert:
+        return None
+    title = str(data.get("title") or "").strip()
+    if not title:
+        raise ValueError("子任务标题不能为空")
+    status = str(data.get("status") or "todo").strip()
+    if status not in SUBTASK_STATUS_VALUES:
+        status = "todo"
+    team = str(data.get("team") or "").strip()
+    assignee = str(data.get("assignee") or "").strip()
+    due_at = str(data.get("due_at") or "").strip()
+    sid = _id("stk_")
+    now = _now()
+    rnd = int(alert.get("round") or 1)
+    with _conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO subtasks
+            (id, alert_id, title, team, assignee, status, due_at, round, created_by, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (sid, alert_id, title, team, assignee, status, due_at, rnd, actor, now, now),
+        )
+    detail = ("（团队：" + team + "）" if team else "") + ("（负责人：" + assignee + "）" if assignee else "")
+    add_note(alert_id, f"新增处置子任务：{title}{detail}", "assignment", actor, audit=False)
+    _audit("create_subtask", "subtask", sid, actor, after={"alert_id": alert_id, "title": title})
+    with _conn() as conn:
+        row = conn.execute("SELECT * FROM subtasks WHERE id = ?", (sid,)).fetchone()
+    return _row_to_subtask(row)
+
+
+def update_subtask(subtask_id: str, data: Dict[str, Any], actor: str = DEFAULT_ACTOR) -> Optional[Dict[str, Any]]:
+    with _conn() as conn:
+        row = conn.execute("SELECT * FROM subtasks WHERE id = ?", (subtask_id,)).fetchone()
+    if not row:
+        return None
+    before = _row_to_subtask(row)
+    updates: Dict[str, Any] = {}
+    for key in ("title", "team", "assignee", "due_at"):
+        if key in data:
+            updates[key] = str(data.get(key) or "").strip()
+    if "status" in data:
+        st = str(data.get("status") or "").strip()
+        if st not in SUBTASK_STATUS_VALUES:
+            raise ValueError("子任务状态无效")
+        updates["status"] = st
+    if not updates:
+        return before
+    sets = ", ".join(f"{k} = ?" for k in updates) + ", updated_at = ?"
+    params = list(updates.values()) + [_now(), subtask_id]
+    with _conn() as conn:
+        conn.execute(f"UPDATE subtasks SET {sets} WHERE id = ?", params)
+        row = conn.execute("SELECT * FROM subtasks WHERE id = ?", (subtask_id,)).fetchone()
+    after = _row_to_subtask(row)
+    if "status" in updates and updates["status"] != before.get("status"):
+        add_note(
+            before["alert_id"],
+            f"处置子任务「{after['title']}」状态：{before.get('status_label')} → {after['status_label']}（操作人：{actor}）",
+            "assignment",
+            actor,
+            audit=False,
+        )
+    _audit("update_subtask", "subtask", subtask_id, actor, before=before, after=after)
+    return after
+
+
+def delete_subtask(subtask_id: str, actor: str = DEFAULT_ACTOR) -> bool:
+    with _conn() as conn:
+        row = conn.execute("SELECT * FROM subtasks WHERE id = ?", (subtask_id,)).fetchone()
+        if not row:
+            return False
+        item = _row_to_subtask(row)
+        conn.execute("DELETE FROM subtasks WHERE id = ?", (subtask_id,))
+    add_note(item["alert_id"], f"删除处置子任务：{item['title']}（操作人：{actor}）", "assignment", actor, audit=False)
+    _audit("delete_subtask", "subtask", subtask_id, actor, before=item)
+    return True
 
 
 def get_alert_correlation(alert_id: str, limit: int = 20) -> Optional[Dict[str, Any]]:
@@ -1728,20 +1976,12 @@ def get_stats() -> Dict[str, Any]:
             "SELECT count(*) AS c FROM alerts WHERE status IN ('new','pending','assigned','triaging','investigating','need_info','waiting_info','confirmed')"
         ).fetchone()["c"]
         unassigned = conn.execute(
-            "SELECT count(*) AS c FROM alerts WHERE (owner IS NULL OR owner = '') AND status NOT IN ('closed','escalated')"
+            "SELECT count(*) AS c FROM alerts WHERE (handlers IS NULL OR handlers = '' OR handlers = '[]') AND status NOT IN ('closed','escalated')"
         ).fetchone()["c"]
-        active_rows = conn.execute(
-            "SELECT * FROM alerts WHERE status NOT IN ('closed','escalated')"
-        ).fetchall()
-        active_alerts = [_row_to_alert(row) for row in active_rows]
-        overdue = sum(1 for item in active_alerts if item.get("sla", {}).get("status") == "overdue")
-        warning = sum(1 for item in active_alerts if item.get("sla", {}).get("status") == "warning")
     return {
         "total": total,
         "pending": pending,
         "unassigned": unassigned,
-        "sla_overdue": overdue,
-        "sla_warning": warning,
         "by_status": by_status,
         "by_severity": by_severity,
         "by_source": by_source,
@@ -1767,7 +2007,6 @@ def get_operations_summary(days: int = 7) -> Dict[str, Any]:
 
     period_alerts = []
     closed_period = []
-    escalated_period = []
     for item in rows:
         created_at = _parse_time(item.get("created_at"))
         updated_at = _parse_time(item.get("updated_at"))
@@ -1775,12 +2014,8 @@ def get_operations_summary(days: int = 7) -> Dict[str, Any]:
             period_alerts.append(item)
         if item.get("status") == "closed" and updated_at and updated_at >= start_time:
             closed_period.append(item)
-        if item.get("status") == "escalated" and updated_at and updated_at >= start_time:
-            escalated_period.append(item)
 
     active_alerts = [item for item in rows if item.get("status") not in CLOSED_STATUSES]
-    overdue_alerts = [item for item in active_alerts if item.get("sla", {}).get("status") == "overdue"]
-    warning_alerts = [item for item in active_alerts if item.get("sla", {}).get("status") == "warning"]
 
     close_hours = []
     for item in closed_period:
@@ -1792,10 +2027,8 @@ def get_operations_summary(days: int = 7) -> Dict[str, Any]:
     owner_map: Dict[str, Dict[str, Any]] = {}
     for item in active_alerts:
         owner = item.get("owner") or "未分派"
-        bucket = owner_map.setdefault(owner, {"owner": owner, "active": 0, "overdue": 0, "critical_high": 0})
+        bucket = owner_map.setdefault(owner, {"owner": owner, "active": 0, "critical_high": 0})
         bucket["active"] += 1
-        if item.get("sla", {}).get("status") == "overdue":
-            bucket["overdue"] += 1
         if item.get("severity") in {"critical", "high"}:
             bucket["critical_high"] += 1
 
@@ -1805,7 +2038,7 @@ def get_operations_summary(days: int = 7) -> Dict[str, Any]:
     daily: Dict[str, Dict[str, int]] = {}
     for offset in range(days - 1, -1, -1):
         day = (datetime.now(timezone.utc) - timedelta(days=offset)).date().isoformat()
-        daily[day] = {"date": day, "created": 0, "closed": 0, "escalated": 0}
+        daily[day] = {"date": day, "created": 0, "closed": 0}
     for item in rows:
         created_at = _parse_time(item.get("created_at"))
         updated_at = _parse_time(item.get("updated_at"))
@@ -1813,10 +2046,10 @@ def get_operations_summary(days: int = 7) -> Dict[str, Any]:
             day = created_at.date().isoformat()
             if day in daily:
                 daily[day]["created"] += 1
-        if updated_at and updated_at >= start_time and item.get("status") in {"closed", "escalated"}:
+        if updated_at and updated_at >= start_time and item.get("status") == "closed":
             day = updated_at.date().isoformat()
             if day in daily:
-                daily[day][item["status"]] += 1
+                daily[day]["closed"] += 1
 
     return {
         "period_days": days,
@@ -1824,13 +2057,10 @@ def get_operations_summary(days: int = 7) -> Dict[str, Any]:
         "summary": {
             "created": len(period_alerts),
             "closed": len(closed_period),
-            "escalated": len(escalated_period),
             "active": len(active_alerts),
-            "overdue": len(overdue_alerts),
-            "warning": len(warning_alerts),
             "avg_close_hours": round(sum(close_hours) / len(close_hours), 2) if close_hours else 0,
         },
-        "owner_workload": sorted(owner_map.values(), key=lambda item: (item["overdue"], item["active"]), reverse=True),
+        "owner_workload": sorted(owner_map.values(), key=lambda item: (item["critical_high"], item["active"]), reverse=True),
         "source_rank": [{"name": name, "count": count} for name, count in source_counter.most_common(8)],
         "category_rank": [{"name": name, "count": count} for name, count in category_counter.most_common(8)],
         "conclusion_rank": [{"name": name, "count": count} for name, count in conclusion_counter.most_common(8)],
@@ -1854,19 +2084,17 @@ def export_operations_csv(days: int = 7) -> str:
         f"summary,period_days,{report['period_days']}",
         f"summary,created,{report['summary']['created']}",
         f"summary,closed,{report['summary']['closed']}",
-        f"summary,escalated,{report['summary']['escalated']}",
         f"summary,active,{report['summary']['active']}",
-        f"summary,overdue,{report['summary']['overdue']}",
         f"summary,avg_close_hours,{report['summary']['avg_close_hours']}",
     ]
     for item in report["owner_workload"]:
-        lines.append(",".join(["owner_workload", _csv_cell(item["owner"]), str(item["active"]), str(item["overdue"]), str(item["critical_high"])]))
+        lines.append(",".join(["owner_workload", _csv_cell(item["owner"]), str(item["active"]), str(item["critical_high"])]))
     for item in report["source_rank"]:
         lines.append(",".join(["source_rank", _csv_cell(item["name"]), str(item["count"])]))
     for item in report["top_entities"]:
         lines.append(",".join(["top_entities", _csv_cell(item["entity_type"]), _csv_cell(item["value"]), str(item["count"])]))
     for item in report["daily_trend"]:
-        lines.append(",".join(["daily_trend", item["date"], str(item["created"]), str(item["closed"]), str(item["escalated"])]))
+        lines.append(",".join(["daily_trend", item["date"], str(item["created"]), str(item["closed"])]))
     return "\ufeff" + "\n".join(lines) + "\n"
 
 
@@ -1909,13 +2137,6 @@ def export_alert(alert_id: str, fmt: str = "json") -> Optional[Any]:
             lines.append(
                 f"- {assignment['created_at']} {assignment.get('assigned_by') or '-'}: "
                 f"{assignment.get('from_owner') or '未分派'} -> {assignment.get('to_owner') or '未分派'}"
-            )
-        lines.extend(["", "## 升级记录"])
-        for escalation in alert.get("escalations", []):
-            lines.append(
-                f"- {escalation['created_at']} {escalation.get('escalated_by') or '-'} -> "
-                f"{escalation.get('target_team') or '-'} [{escalation.get('severity') or '-'}]: "
-                f"{escalation.get('reason') or '-'}"
             )
         lines.extend(["", "## 附件"])
         for att in alert.get("attachments", []):

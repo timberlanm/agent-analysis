@@ -7,6 +7,7 @@ import json
 from flask import Blueprint, Response, jsonify, request, send_from_directory
 
 from backend.services import incident_service
+from backend.services import ocr_service
 
 
 incident_bp = Blueprint("incident", __name__)
@@ -136,6 +137,35 @@ def delete_attachment(attachment_id):
     return jsonify({"success": True})
 
 
+@incident_bp.route("/ocr/status", methods=["GET"])
+def ocr_status():
+    """OCR 能力探测：引擎是否就绪、用的哪个引擎、未就绪时的安装指引。"""
+    return jsonify({"success": True, "data": ocr_service.engine_status()})
+
+
+@incident_bp.route("/extract-fields", methods=["POST"])
+def extract_fields():
+    """从一段纯文本（如粘贴的告警内容）解析候选字段。纯规则，不依赖 OCR 引擎。"""
+    text = _json_body().get("text", "")
+    if not isinstance(text, str) or not text.strip():
+        return jsonify({"success": False, "error": "文本为空"}), 400
+    fields = ocr_service.parse_fields_from_text(text)
+    return jsonify({"success": True, "data": {"fields": fields}})
+
+
+@incident_bp.route("/alerts/<alert_id>/ocr", methods=["POST"])
+def ocr_alert(alert_id):
+    """对该告警的图片附件做 OCR，返回候选字段供研判员核对（不写库）。"""
+    alert = incident_service.get_alert(alert_id)
+    if not alert:
+        return jsonify({"success": False, "error": "告警不存在"}), 404
+    try:
+        result = ocr_service.extract_from_alert(alert_id)
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+    return jsonify({"success": True, "data": result})
+
+
 @incident_bp.route("/alerts/<alert_id>/entities", methods=["GET"])
 def list_alert_entities(alert_id):
     alert = incident_service.get_alert(alert_id)
@@ -224,15 +254,101 @@ def set_alert_conclusion(alert_id):
     return jsonify({"success": True, "data": alert})
 
 
-@incident_bp.route("/alerts/<alert_id>/escalate", methods=["POST"])
-def escalate_alert(alert_id):
+@incident_bp.route("/alerts/<alert_id>/handlers", methods=["POST"])
+def add_alert_handler(alert_id):
+    data = _json_body()
     try:
-        alert = incident_service.escalate_alert(alert_id, _json_body(), actor=_actor())
+        alert = incident_service.assign_handler(alert_id, data.get("name", ""), actor=_actor())
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 400
     if not alert:
         return jsonify({"success": False, "error": "告警不存在"}), 404
     return jsonify({"success": True, "data": alert})
+
+
+@incident_bp.route("/alerts/<alert_id>/handlers", methods=["DELETE"])
+def remove_alert_handler(alert_id):
+    data = _json_body()
+    alert = incident_service.remove_handler(alert_id, data.get("name", ""), actor=_actor())
+    if not alert:
+        return jsonify({"success": False, "error": "告警不存在"}), 404
+    return jsonify({"success": True, "data": alert})
+
+
+@incident_bp.route("/alerts/<alert_id>/handlers", methods=["PUT"])
+def set_alert_handlers(alert_id):
+    data = _json_body()
+    alert = incident_service.set_handlers(alert_id, data.get("names", []), actor=_actor())
+    if not alert:
+        return jsonify({"success": False, "error": "告警不存在"}), 404
+    return jsonify({"success": True, "data": alert})
+
+
+@incident_bp.route("/alerts/<alert_id>/reject", methods=["POST"])
+def reject_alert(alert_id):
+    data = _json_body()
+    try:
+        alert = incident_service.reject_alert(alert_id, data.get("reason", ""), actor=_actor())
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+    if not alert:
+        return jsonify({"success": False, "error": "告警不存在"}), 404
+    return jsonify({"success": True, "data": alert})
+
+
+@incident_bp.route("/alerts/<alert_id>/reopen", methods=["POST"])
+def reopen_alert(alert_id):
+    data = _json_body()
+    try:
+        alert = incident_service.reopen_alert(
+            alert_id,
+            data.get("conclusion", ""),
+            _actor(),
+            data.get("reason", ""),
+        )
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+    if not alert:
+        return jsonify({"success": False, "error": "告警不存在"}), 404
+    return jsonify({"success": True, "data": alert})
+
+
+@incident_bp.route("/alerts/<alert_id>/subtasks", methods=["GET"])
+def list_alert_subtasks(alert_id):
+    if not incident_service.get_alert(alert_id):
+        return jsonify({"success": False, "error": "告警不存在"}), 404
+    items = incident_service.list_subtasks(alert_id)
+    return jsonify({"success": True, "data": {"subtasks": items, "count": len(items)}})
+
+
+@incident_bp.route("/alerts/<alert_id>/subtasks", methods=["POST"])
+def add_alert_subtask(alert_id):
+    try:
+        item = incident_service.create_subtask(alert_id, _json_body(), actor=_actor())
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+    if not item:
+        return jsonify({"success": False, "error": "告警不存在"}), 404
+    return jsonify({"success": True, "data": item})
+
+
+@incident_bp.route("/subtasks/<subtask_id>", methods=["PUT"])
+def update_subtask(subtask_id):
+    try:
+        item = incident_service.update_subtask(subtask_id, _json_body(), actor=_actor())
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+    if not item:
+        return jsonify({"success": False, "error": "子任务不存在"}), 404
+    return jsonify({"success": True, "data": item})
+
+
+@incident_bp.route("/subtasks/<subtask_id>", methods=["DELETE"])
+def delete_subtask(subtask_id):
+    ok = incident_service.delete_subtask(subtask_id, actor=_actor())
+    if not ok:
+        return jsonify({"success": False, "error": "子任务不存在"}), 404
+    return jsonify({"success": True})
 
 
 @incident_bp.route("/alerts/<alert_id>/related", methods=["GET"])
@@ -353,7 +469,11 @@ def serve_file(filepath):
     full = incident_service.resolve_file_path(filepath)
     if not full or not full.is_file():
         return jsonify({"success": False, "error": "文件不存在"}), 404
-    return send_from_directory(str(full.parent), full.name)
+    # 文本类日志以 text/plain 内联返回，便于浏览器直接查看（而非下载）
+    mimetype = None
+    if full.suffix.lower() in {".log", ".txt"}:
+        mimetype = "text/plain"  # Flask 会自动补 charset=utf-8
+    return send_from_directory(str(full.parent), full.name, mimetype=mimetype)
 
 
 @incident_bp.route("/export", methods=["GET"])

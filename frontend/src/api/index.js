@@ -102,8 +102,30 @@ export function setIncidentAlertStatus(id, status, payload = '') {
 export function setIncidentAlertConclusion(id, conclusion, content = '') {
   return request(`/incident/alerts/${id}/conclusion`, { method: 'POST', body: JSON.stringify({ conclusion, content }) })
 }
-export function escalateIncidentAlert(id, payload) {
-  return request(`/incident/alerts/${id}/escalate`, { method: 'POST', body: JSON.stringify(payload) })
+export function assignIncidentHandler(id, name) {
+  return request(`/incident/alerts/${id}/handlers`, { method: 'POST', body: JSON.stringify({ name }) })
+}
+export function removeIncidentHandler(id, name) {
+  return request(`/incident/alerts/${id}/handlers`, { method: 'DELETE', body: JSON.stringify({ name }) })
+}
+export function setIncidentHandlers(id, names) {
+  return request(`/incident/alerts/${id}/handlers`, { method: 'PUT', body: JSON.stringify({ names }) })
+}
+export function rejectIncidentAlert(id, reason = '') {
+  return request(`/incident/alerts/${id}/reject`, { method: 'POST', body: JSON.stringify({ reason }) })
+}
+export function reopenIncidentAlert(id, conclusion, reason = '') {
+  return request(`/incident/alerts/${id}/reopen`, { method: 'POST', body: JSON.stringify({ conclusion, reason }) })
+}
+export function listIncidentSubtasks(id) { return request(`/incident/alerts/${id}/subtasks`) }
+export function addIncidentSubtask(id, data) {
+  return request(`/incident/alerts/${id}/subtasks`, { method: 'POST', body: JSON.stringify(data) })
+}
+export function updateIncidentSubtask(subtaskId, data) {
+  return request(`/incident/subtasks/${subtaskId}`, { method: 'PUT', body: JSON.stringify(data) })
+}
+export function deleteIncidentSubtask(subtaskId) {
+  return request(`/incident/subtasks/${subtaskId}`, { method: 'DELETE' })
 }
 export function addIncidentNote(id, content, noteType = 'manual') {
   return request(`/incident/alerts/${id}/notes`, { method: 'POST', body: JSON.stringify({ content, note_type: noteType }) })
@@ -142,6 +164,17 @@ export async function uploadIncidentAttachment(alertId, file, description = '') 
   return data
 }
 export function deleteIncidentAttachment(id) { return request(`/incident/attachments/${id}`, { method: 'DELETE' }) }
+
+// 从截图 OCR 识别告警字段（识别可能较慢，放宽超时；仅返回候选，不写库）
+export function ocrIncidentAlert(id) {
+  return request(`/incident/alerts/${id}/ocr`, { method: 'POST', timeout: 120000 })
+}
+export function getIncidentOcrStatus() { return request('/incident/ocr/status') }
+
+// 从一段纯文本（粘贴的告警内容）解析候选字段。纯规则、无需 OCR 引擎
+export function extractIncidentFields(text) {
+  return request('/incident/extract-fields', { method: 'POST', body: JSON.stringify({ text }) })
+}
 
 // Legacy helpers kept for compatibility with older screens/scripts.
 export async function uploadIncidentImage(file) {
