@@ -2,6 +2,7 @@
 研判分析 - 服务层
 多源安全告警录入、附件管理、实体抽取、研判记录、关联查询和审计。
 """
+import hashlib
 import json
 import os
 import re
@@ -19,7 +20,8 @@ from werkzeug.utils import secure_filename
 BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = BASE_DIR / "data"
 UPLOAD_BASE = str(BASE_DIR / "uploads" / "incident")
-DB_PATH = DATA_DIR / "analysis_store.db"
+# 可用环境变量 INCIDENT_DB_PATH 覆盖库路径（测试隔离用；默认仍是仓库内 data 库）
+DB_PATH = Path(os.environ.get("INCIDENT_DB_PATH") or (DATA_DIR / "analysis_store.db"))
 
 ALLOWED_IMAGE_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 LOG_EXTENSIONS = {".json", ".txt", ".log", ".csv", ".out"}
@@ -434,12 +436,15 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS audit_logs (
                 id TEXT PRIMARY KEY,
                 actor TEXT,
+                actor_user_id TEXT,
                 action TEXT NOT NULL,
                 target_type TEXT NOT NULL,
                 target_id TEXT,
                 before_data TEXT,
                 after_data TEXT,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                prev_hash TEXT,
+                entry_hash TEXT
             );
 
             CREATE TABLE IF NOT EXISTS subtasks (
@@ -485,6 +490,14 @@ def init_db() -> None:
         note_columns = {row["name"] for row in conn.execute("PRAGMA table_info(notes)")}
         if "round" not in note_columns:
             conn.execute("ALTER TABLE notes ADD COLUMN round INTEGER NOT NULL DEFAULT 1")
+        # 审计强化：真实账号硬关联 + 防篡改哈希链（旧库幂等补列）
+        audit_columns = {row["name"] for row in conn.execute("PRAGMA table_info(audit_logs)")}
+        if "actor_user_id" not in audit_columns:
+            conn.execute("ALTER TABLE audit_logs ADD COLUMN actor_user_id TEXT")
+        if "prev_hash" not in audit_columns:
+            conn.execute("ALTER TABLE audit_logs ADD COLUMN prev_hash TEXT")
+        if "entry_hash" not in audit_columns:
+            conn.execute("ALTER TABLE audit_logs ADD COLUMN entry_hash TEXT")
 
 
 def _row_to_alert(row: sqlite3.Row) -> Dict[str, Any]:
@@ -540,6 +553,21 @@ def _row_to_audit(row: sqlite3.Row) -> Dict[str, Any]:
     return item
 
 
+def _audit_hash(*parts: Optional[str]) -> str:
+    """审计条目哈希：sha256(prev_hash | 规范化字段…)，用于防篡改链。"""
+    canonical = "|".join(p or "" for p in parts)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _resolve_actor_user_id(conn: sqlite3.Connection, actor: str) -> Optional[str]:
+    """把 actor 用户名硬关联到 users.id（找不到=遗留/服务/匿名，返回 None）。"""
+    try:
+        row = conn.execute("SELECT id FROM users WHERE username = ?", (actor,)).fetchone()
+        return row["id"] if row else None
+    except sqlite3.Error:
+        return None
+
+
 def _audit(
     action: str,
     target_type: str,
@@ -548,14 +576,30 @@ def _audit(
     before: Any = None,
     after: Any = None,
 ) -> None:
+    aid = _id("aud_")
+    created = _now()
+    before_s = _json_dumps(before)
+    after_s = _json_dumps(after)
     with _conn() as conn:
+        # 在同一 EXCLUSIVE 连接内「读上一条哈希 + 写新条目」，保证链的顺序一致
+        actor_user_id = _resolve_actor_user_id(conn, actor)
+        prev = conn.execute(
+            "SELECT entry_hash FROM audit_logs ORDER BY rowid DESC LIMIT 1"
+        ).fetchone()
+        prev_hash = (prev["entry_hash"] if prev and prev["entry_hash"] else "")
+        entry_hash = _audit_hash(
+            prev_hash, aid, actor, actor_user_id, action, target_type, target_id,
+            before_s, after_s, created,
+        )
         conn.execute(
             """
             INSERT INTO audit_logs
-            (id, actor, action, target_type, target_id, before_data, after_data, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (id, actor, actor_user_id, action, target_type, target_id,
+             before_data, after_data, created_at, prev_hash, entry_hash)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (_id("aud_"), actor, action, target_type, target_id, _json_dumps(before), _json_dumps(after), _now()),
+            (aid, actor, actor_user_id, action, target_type, target_id,
+             before_s, after_s, created, prev_hash, entry_hash),
         )
 
 
@@ -881,6 +925,16 @@ def list_alerts(filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]
         )
         like = f"%{keyword}%"
         params.extend([like, like, like, like, like])
+
+    # 授权可见性过滤(与研判逻辑无关):仅当调用方显式传入 restrict_to_actor 时生效,
+    # 把结果限制为该账号「经手/受指派」的告警(owner/created_by/handlers/子任务负责人)。
+    restrict_actor = filters.get("restrict_to_actor")
+    if restrict_actor:
+        clauses.append(
+            "(owner = ? OR created_by = ? OR handlers LIKE ? "
+            "OR id IN (SELECT alert_id FROM subtasks WHERE assignee = ?))"
+        )
+        params.extend([restrict_actor, restrict_actor, f'%"{restrict_actor}"%', restrict_actor])
 
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     limit = int(filters.get("limit") or 200)
@@ -1712,6 +1766,22 @@ def list_subtasks(alert_id: str) -> List[Dict[str, Any]]:
     return [_row_to_subtask(r) for r in rows]
 
 
+def get_subtask(subtask_id: str) -> Optional[Dict[str, Any]]:
+    """按子任务 ID 取单条（含 alert_id），用于对象级授权时定位父告警。"""
+    init_db()
+    with _conn() as conn:
+        row = conn.execute("SELECT * FROM subtasks WHERE id = ?", (subtask_id,)).fetchone()
+    return _row_to_subtask(row) if row else None
+
+
+def get_entity_alert_id(entity_id: str) -> Optional[str]:
+    """按实体 ID 反查所属告警 ID，用于对象级授权。"""
+    init_db()
+    with _conn() as conn:
+        row = conn.execute("SELECT alert_id FROM entities WHERE id = ?", (entity_id,)).fetchone()
+    return row["alert_id"] if row else None
+
+
 def create_subtask(alert_id: str, data: Dict[str, Any], actor: str = DEFAULT_ACTOR) -> Optional[Dict[str, Any]]:
     """新增应急处置子任务（轻量）：标题必填，团队/负责人/状态可选，关联当前研判轮次。"""
     alert = get_alert(alert_id)
@@ -2155,11 +2225,39 @@ def export_all() -> Dict[str, Any]:
     }
 
 
-def list_audit(limit: int = 100) -> List[Dict[str, Any]]:
+def _audit_where(filters: Optional[Dict[str, Any]]) -> Tuple[str, List[Any]]:
+    """按可选条件拼装审计检索的 WHERE（actor/action/target_type/target_id/关键词/时间范围）。"""
+    filters = filters or {}
+    clauses: List[str] = []
+    params: List[Any] = []
+    exact = {"actor": "actor", "action": "action", "target_type": "target_type", "target_id": "target_id"}
+    for key, column in exact.items():
+        val = filters.get(key)
+        if val:
+            clauses.append(f"{column} = ?")
+            params.append(val)
+    keyword = filters.get("keyword")
+    if keyword:
+        like = f"%{keyword}%"
+        clauses.append("(actor LIKE ? OR action LIKE ? OR target_id LIKE ? OR before_data LIKE ? OR after_data LIKE ?)")
+        params.extend([like, like, like, like, like])
+    if filters.get("start"):
+        clauses.append("created_at >= ?")
+        params.append(filters["start"])
+    if filters.get("end"):
+        clauses.append("created_at <= ?")
+        params.append(filters["end"])
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    return where, params
+
+
+def list_audit(limit: int = 100, filters: Optional[Dict[str, Any]] = None, offset: int = 0) -> List[Dict[str, Any]]:
     init_db()
+    where, params = _audit_where(filters)
     with _conn() as conn:
         rows = conn.execute(
-            "SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT ?", (int(limit),)
+            f"SELECT * FROM audit_logs {where} ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?",
+            params + [int(limit), int(offset)],
         ).fetchall()
     items = []
     for row in rows:
@@ -2168,6 +2266,55 @@ def list_audit(limit: int = 100) -> List[Dict[str, Any]]:
         item["after_data"] = _json_loads(item.get("after_data"), {})
         items.append(item)
     return items
+
+
+def verify_audit_chain() -> Dict[str, Any]:
+    """校验审计哈希链完整性：按写入顺序重算每条 entry_hash 并核对前后衔接。
+    仅校验已带哈希的条目（哈希机制启用前的历史条目跳过并计数）。"""
+    init_db()
+    with _conn() as conn:
+        rows = conn.execute("SELECT * FROM audit_logs ORDER BY rowid ASC").fetchall()
+    checked = 0
+    skipped_legacy = 0
+    prev_hash = ""
+    broken_at = None
+    for row in rows:
+        if not row["entry_hash"]:
+            skipped_legacy += 1
+            continue
+        recomputed = _audit_hash(
+            prev_hash, row["id"], row["actor"], row["actor_user_id"], row["action"],
+            row["target_type"], row["target_id"], row["before_data"], row["after_data"], row["created_at"],
+        )
+        stored_prev = row["prev_hash"] or ""
+        if stored_prev != prev_hash or recomputed != row["entry_hash"]:
+            broken_at = {"id": row["id"], "created_at": row["created_at"], "action": row["action"]}
+            break
+        prev_hash = row["entry_hash"]
+        checked += 1
+    return {
+        "ok": broken_at is None,
+        "checked": checked,
+        "skipped_legacy": skipped_legacy,
+        "broken_at": broken_at,
+    }
+
+
+def export_audit_csv(filters: Optional[Dict[str, Any]] = None, limit: int = 10000) -> str:
+    import csv
+    import io
+    items = list_audit(limit=limit, filters=filters)
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["时间", "操作人", "账号ID", "动作", "对象类型", "对象ID", "before", "after", "完整性"])
+    for it in items:
+        writer.writerow([
+            it.get("created_at", ""), it.get("actor", ""), it.get("actor_user_id") or "",
+            it.get("action", ""), it.get("target_type", ""), it.get("target_id") or "",
+            _json_dumps(it.get("before_data")), _json_dumps(it.get("after_data")),
+            "hashed" if it.get("entry_hash") else "legacy",
+        ])
+    return buf.getvalue()
 
 
 def clear_all() -> bool:

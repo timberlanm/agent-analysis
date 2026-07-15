@@ -39,23 +39,47 @@ function apiUrl(path) {
   return `${API_BASE}/api${path}`
 }
 
+// 读取 cookie（用于取 CSRF 双提交令牌）
+export function getCookie(name) {
+  if (typeof document === 'undefined') return ''
+  const escaped = name.replace(/([.$?*|{}()\[\]\\/+^])/g, '\\$1')
+  const m = document.cookie.match('(?:^|; )' + escaped + '=([^;]*)')
+  return m ? decodeURIComponent(m[1]) : ''
+}
+
+// 携带会话 cookie 的写请求需回传 CSRF 头
+export function csrfHeaders() {
+  return { 'X-CSRF-Token': getCookie('csrf_token') }
+}
+
+// 会话过期/未登录时通知全局（App 监听后跳登录页）
+function notifyUnauthorized() {
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('auth-unauthorized'))
+  }
+}
+
 async function request(url, options = {}) {
   const controller = new AbortController()
   const timeoutMs = options.timeout || 30000
   const timer = setTimeout(() => controller.abort(), timeoutMs)
 
   const fetchOpts = {
+    ...options,
+    credentials: 'include',
     headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
     signal: options.signal || controller.signal,
-    ...options,
   }
-  if (options.signal) {
-    fetchOpts.signal = options.signal
-    clearTimeout(timer)
+  const method = (fetchOpts.method || 'GET').toUpperCase()
+  if (['POST', 'PUT', 'DELETE', 'PATCH'].includes(method)) {
+    Object.assign(fetchOpts.headers, csrfHeaders())
   }
+  if (options.signal) clearTimeout(timer)
 
   try {
     const resp = await fetch(apiUrl(url), fetchOpts)
+    // /auth/* 自行处理 401（登录前的探测），其余接口 401 视为会话失效
+    if (resp.status === 401 && !url.startsWith('/auth/')) notifyUnauthorized()
     if (!resp.ok) {
       let errMsg = `HTTP ${resp.status}`
       try { const body = await resp.json(); errMsg = body.error || errMsg } catch (_) {}
@@ -139,16 +163,35 @@ export function getIncidentCorrelation(id, limit = 20) { return request(`/incide
 export function getIncidentStats() { return request('/incident/stats') }
 export function getIncidentOperations(days = 7) { return request(`/incident/operations/summary?days=${days}`) }
 export function getIncidentTemplates() { return request('/incident/templates') }
-export function getIncidentAudit(limit = 100) { return request(`/incident/audit?limit=${limit}`) }
+export function getIncidentAudit(params = {}) {
+  const q = new URLSearchParams()
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== null && v !== '') q.append(k, v)
+  }
+  const qs = q.toString()
+  return request(`/incident/audit${qs ? '?' + qs : ''}`)
+}
+export function verifyIncidentAudit() { return request('/incident/audit/verify') }
+export async function exportIncidentAuditCsv(params = {}) {
+  const q = new URLSearchParams()
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== null && v !== '') q.append(k, v)
+  }
+  const qs = q.toString()
+  const resp = await fetch(apiUrl(`/incident/audit/export${qs ? '?' + qs : ''}`), { credentials: 'include' })
+  const text = await resp.text()
+  if (!resp.ok) throw new Error(text || '导出失败')
+  return text
+}
 export function exportIncidentAlert(id) { return request(`/incident/alerts/${id}/export`) }
 export async function exportIncidentAlertMarkdown(id) {
-  const resp = await fetch(apiUrl(`/incident/alerts/${id}/export?format=markdown`))
+  const resp = await fetch(apiUrl(`/incident/alerts/${id}/export?format=markdown`), { credentials: 'include' })
   const text = await resp.text()
   if (!resp.ok) throw new Error(text || '导出失败')
   return text
 }
 export async function exportIncidentOperationsCsv(days = 7) {
-  const resp = await fetch(apiUrl(`/incident/operations/export?days=${days}`))
+  const resp = await fetch(apiUrl(`/incident/operations/export?days=${days}`), { credentials: 'include' })
   const text = await resp.text()
   if (!resp.ok) throw new Error(text || '导出失败')
   return text
@@ -158,7 +201,9 @@ export async function uploadIncidentAttachment(alertId, file, description = '') 
   const form = new FormData()
   form.append('file', file)
   if (description) form.append('description', description)
-  const resp = await fetch(apiUrl(`/incident/alerts/${alertId}/attachments`), { method: 'POST', body: form })
+  const resp = await fetch(apiUrl(`/incident/alerts/${alertId}/attachments`), {
+    method: 'POST', body: form, credentials: 'include', headers: csrfHeaders(),
+  })
   const data = await resp.json()
   if (!resp.ok) throw new Error(data.error || '上传失败')
   return data
@@ -180,7 +225,9 @@ export function extractIncidentFields(text) {
 export async function uploadIncidentImage(file) {
   const form = new FormData()
   form.append('image', file)
-  const resp = await fetch(apiUrl('/incident/upload_image'), { method: 'POST', body: form })
+  const resp = await fetch(apiUrl('/incident/upload_image'), {
+    method: 'POST', body: form, credentials: 'include', headers: csrfHeaders(),
+  })
   const data = await resp.json()
   if (!resp.ok) throw new Error(data.error || '上传失败')
   return data
@@ -188,7 +235,9 @@ export async function uploadIncidentImage(file) {
 export async function uploadIncidentAlertFile(file) {
   const form = new FormData()
   form.append('alert', file)
-  const resp = await fetch(apiUrl('/incident/upload_alert'), { method: 'POST', body: form })
+  const resp = await fetch(apiUrl('/incident/upload_alert'), {
+    method: 'POST', body: form, credentials: 'include', headers: csrfHeaders(),
+  })
   const data = await resp.json()
   if (!resp.ok) throw new Error(data.error || '上传失败')
   return data
@@ -198,3 +247,42 @@ export function listIncidentImages() { return request('/incident/images') }
 export function deleteIncidentImage(id) { return request(`/incident/images/${id}`, { method: 'DELETE' }) }
 export function exportIncident() { return request('/incident/export') }
 export function clearIncident() { return request('/incident/clear', { method: 'POST' }) }
+
+// ==================== 认证 / 账号（Auth / RBAC） ====================
+export function authLogin(username, password) {
+  return request('/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) })
+}
+export function authLogout() { return request('/auth/logout', { method: 'POST' }) }
+export function authMe() { return request('/auth/me') }
+// 指派选人目录（供有 alert.assign / subtask.manage 权限者读取）
+export function getAuthDirectory(role = '') {
+  return request(`/auth/directory${role ? '?role=' + encodeURIComponent(role) : ''}`)
+}
+export function authChangePassword(oldPassword, newPassword) {
+  return request('/auth/change-password', {
+    method: 'POST',
+    body: JSON.stringify({ old_password: oldPassword, new_password: newPassword }),
+  })
+}
+// 用户管理（仅 system.manage）
+export function listAuthUsers() { return request('/auth/users') }
+export function createAuthUser(data) {
+  return request('/auth/users', { method: 'POST', body: JSON.stringify(data) })
+}
+export function updateAuthUser(id, data) {
+  return request(`/auth/users/${id}`, { method: 'PUT', body: JSON.stringify(data) })
+}
+export function resetAuthUserPassword(id, password) {
+  return request(`/auth/users/${id}/password`, { method: 'POST', body: JSON.stringify({ password }) })
+}
+// 服务令牌（自动化入库，仅管理员）
+export function listApiTokens() { return request('/auth/tokens') }
+export function createApiToken(data) {
+  return request('/auth/tokens', { method: 'POST', body: JSON.stringify(data) })
+}
+export function revokeApiToken(id) { return request(`/auth/tokens/${id}`, { method: 'DELETE' }) }
+// 角色-权限矩阵（可配置，仅管理员）
+export function getRolePermissions() { return request('/auth/permissions') }
+export function setRolePermissions(roleCode, permissions) {
+  return request(`/auth/roles/${roleCode}/permissions`, { method: 'PUT', body: JSON.stringify({ permissions }) })
+}

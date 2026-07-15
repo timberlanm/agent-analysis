@@ -1,0 +1,5 @@
+# 开发/测试依赖（生产运行不需要）
+# 安装：pip install -r backend/requirements-dev.txt
+#   国内网络慢可加镜像，例如：
+#   pip install -r backend/requirements-dev.txt -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com
+pytest>=8.0
