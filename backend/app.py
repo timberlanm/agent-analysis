@@ -14,8 +14,12 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 from flask import Flask, jsonify, send_from_directory
 from flask_cors import CORS
-from backend.config import FLASK_HOST, FLASK_PORT, FLASK_DEBUG, API_PREFIX
+from backend.config import (
+    FLASK_HOST, FLASK_PORT, FLASK_DEBUG, API_PREFIX, ALLOWED_ORIGINS,
+)
 from backend.api.incident import incident_bp
+from backend.api.auth import auth_bp
+from backend.services import auth_service
 
 # 前端构建产物目录（执行过 npm run build 后生成）
 _FRONTEND_DIST = os.path.abspath(
@@ -26,6 +30,17 @@ _FRONTEND_DIST = os.path.abspath(
 _FRONTEND_SRC = os.path.abspath(
     os.path.join(os.path.dirname(__file__), '..', 'frontend')
 )
+
+
+def _print_bootstrap_admin(password):
+    """首次启动时把一次性管理员口令醒目地打印到控制台。"""
+    line = "!" * 64
+    print(f"\n{line}")
+    print("  首次启动：已创建初始管理员账号")
+    print("    用户名：admin")
+    print(f"    一次性初始口令：{password}")
+    print("  请立即登录并修改口令（登录后会强制要求修改）。此口令仅显示这一次。")
+    print(f"{line}\n")
 
 
 def create_app(serve_frontend=False):
@@ -39,16 +54,27 @@ def create_app(serve_frontend=False):
     # per-type limits for images, logs, compressed logs, and packet captures.
     app.config['MAX_CONTENT_LENGTH'] = 512 * 1024 * 1024
 
-    # CORS：生产/同源部署时不需要，但保留以支持开发模式直连
+    # 持久化随机 SECRET_KEY（缺失则生成落盘，绝不硬编码）
+    app.secret_key = auth_service.ensure_secret_key()
+
+    # 初始化认证库 + 内置角色；首次启动创建 admin 并返回一次性口令
+    admin_password = auth_service.bootstrap()
+    if admin_password:
+        _print_bootstrap_admin(admin_password)
+
+    # CORS：生产/同源部署无需 CORS；开发直连须用具体 origin + 允许携带凭证
+    # （启用 Cookie 会话后 origins 不能再用 "*"）
     CORS(app, resources={
         r"/api/*": {
-            "origins": "*",
+            "origins": ALLOWED_ORIGINS,
             "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-            "allow_headers": ["Content-Type", "Accept", "Cache-Control"],
+            "allow_headers": ["Content-Type", "Accept", "Cache-Control", "X-CSRF-Token"],
+            "supports_credentials": True,
         }
     })
 
-    # 注册 API 蓝图（仅 Incident）
+    # 注册 API 蓝图（认证 + Incident）
+    app.register_blueprint(auth_bp, url_prefix=f'{API_PREFIX}/auth')
     app.register_blueprint(incident_bp, url_prefix=f'{API_PREFIX}/incident')
 
     # 健康检查

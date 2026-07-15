@@ -1,5 +1,8 @@
 <template>
-  <div class="app-container">
+  <!-- 登录等公开页：仅渲染路由内容，不套工作台外壳 -->
+  <router-view v-if="isPublicRoute" />
+
+  <div v-else class="app-container">
     <!-- 主内容区 -->
     <div class="main">
       <!-- 顶部栏 -->
@@ -16,6 +19,31 @@
               <el-icon :size="16" :class="{ 'is-loading': loading }"><Refresh /></el-icon>
             </button>
           </el-tooltip>
+
+          <el-dropdown trigger="click" @command="onUserCommand">
+            <button class="user-btn">
+              <el-icon :size="15"><UserFilled /></el-icon>
+              <span class="user-name">{{ auth.displayName }}</span>
+              <span v-if="primaryRoleName" class="user-role">{{ primaryRoleName }}</span>
+              <el-icon :size="12"><ArrowDown /></el-icon>
+            </button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="changePassword">
+                  <el-icon><Key /></el-icon>修改口令
+                </el-dropdown-item>
+                <el-dropdown-item v-if="auth.hasPerm('audit.view')" command="auditLog">
+                  <el-icon><Document /></el-icon>审计中心
+                </el-dropdown-item>
+                <el-dropdown-item v-if="auth.hasPerm('system.manage')" command="adminUsers">
+                  <el-icon><Setting /></el-icon>账号管理
+                </el-dropdown-item>
+                <el-dropdown-item command="logout" divided>
+                  <el-icon><SwitchButton /></el-icon>退出登录
+                </el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
         </div>
       </header>
 
@@ -32,18 +60,105 @@
         </div>
       </main>
     </div>
+
+    <!-- 修改口令 -->
+    <el-dialog v-model="pwVisible" title="修改口令" width="400px">
+      <el-form label-width="82px">
+        <el-form-item label="当前口令">
+          <el-input v-model="pwForm.old" type="password" show-password autocomplete="current-password" />
+        </el-form-item>
+        <el-form-item label="新口令">
+          <el-input v-model="pwForm.neo" type="password" show-password autocomplete="new-password" placeholder="至少 8 位" />
+        </el-form-item>
+        <el-form-item label="确认新口令">
+          <el-input v-model="pwForm.confirm" type="password" show-password autocomplete="new-password" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="pwVisible = false">取消</el-button>
+        <el-button type="primary" :loading="pwLoading" @click="submitChangePassword">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <AdminUsers v-model="adminVisible" />
+    <AuditLog v-model="auditVisible" />
   </div>
 </template>
 
 <script setup>
-import { ref } from 'vue'
-import { Refresh, Warning } from '@element-plus/icons-vue'
+import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { ElMessage } from 'element-plus'
+import {
+  Refresh, Warning, UserFilled, ArrowDown, Key, Setting, SwitchButton, Document,
+} from '@element-plus/icons-vue'
+import { auth } from './store/auth'
+import { authChangePassword } from './api'
+import AdminUsers from './components/AdminUsers.vue'
+import AuditLog from './components/AuditLog.vue'
 
+const route = useRoute()
+const router = useRouter()
 const loading = ref(false)
+
+const isPublicRoute = computed(() => !!route.meta.public)
+const primaryRoleName = computed(() => auth.user?.roles?.[0]?.name || '')
 
 const refreshData = () => {
   window.dispatchEvent(new CustomEvent('refresh-data'))
 }
+
+// ---- 用户菜单 ----
+const pwVisible = ref(false)
+const pwLoading = ref(false)
+const pwForm = reactive({ old: '', neo: '', confirm: '' })
+const adminVisible = ref(false)
+const auditVisible = ref(false)
+
+function onUserCommand(cmd) {
+  if (cmd === 'changePassword') {
+    pwForm.old = ''
+    pwForm.neo = ''
+    pwForm.confirm = ''
+    pwVisible.value = true
+  } else if (cmd === 'adminUsers') {
+    adminVisible.value = true
+  } else if (cmd === 'auditLog') {
+    auditVisible.value = true
+  } else if (cmd === 'logout') {
+    doLogout()
+  }
+}
+
+async function doLogout() {
+  await auth.logout()
+  router.push('/login')
+}
+
+async function submitChangePassword() {
+  if (pwForm.neo.length < 8) return ElMessage.warning('新口令至少 8 位')
+  if (pwForm.neo !== pwForm.confirm) return ElMessage.warning('两次输入的新口令不一致')
+  pwLoading.value = true
+  try {
+    await authChangePassword(pwForm.old, pwForm.neo)
+    ElMessage.success('口令已更新')
+    pwVisible.value = false
+  } catch (e) {
+    ElMessage.error(e.message || '修改失败')
+  } finally {
+    pwLoading.value = false
+  }
+}
+
+// ---- 会话失效 -> 回登录页 ----
+function handleUnauthorized() {
+  if (route.meta.public) return
+  auth._clear()
+  ElMessage.warning('登录已失效，请重新登录')
+  router.push({ path: '/login', query: { redirect: route.fullPath } })
+}
+onMounted(() => window.addEventListener('auth-unauthorized', handleUnauthorized))
+onBeforeUnmount(() => window.removeEventListener('auth-unauthorized', handleUnauthorized))
 </script>
 
 <style>
@@ -196,6 +311,41 @@ body {
 
 .icon-btn .is-loading {
   animation: rotating 1.5s linear infinite;
+}
+
+/* ===== User menu ===== */
+.user-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+  cursor: pointer;
+  color: var(--text-secondary);
+  transition: all 0.15s ease;
+}
+
+.user-btn:hover {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+.user-btn .user-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.user-btn .user-role {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--primary);
+  background: var(--primary-light);
+  padding: 1px 6px;
+  border-radius: 10px;
 }
 
 @keyframes rotating {

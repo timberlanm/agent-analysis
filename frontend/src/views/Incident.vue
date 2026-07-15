@@ -16,7 +16,7 @@ export default { name: 'Incident' }
             <el-option :value="30" label="近 30 天" />
             <el-option :value="90" label="近 90 天" />
           </el-select>
-          <el-button size="small" @click="exportOperationsCsv">
+          <el-button v-if="hasPerm('export')" size="small" @click="exportOperationsCsv">
             <el-icon><Download /></el-icon>导出报表
           </el-button>
           <el-button size="small" text @click="toggleOps">
@@ -128,7 +128,7 @@ export default { name: 'Incident' }
             <el-button size="small" @click="refreshAll" :loading="loading">
               <el-icon><Refresh /></el-icon>刷新
             </el-button>
-            <el-button size="small" type="primary" @click="openCreate">
+            <el-button v-if="hasPerm('alert.create')" size="small" type="primary" @click="openCreate">
               <el-icon><Plus /></el-icon>新建告警
             </el-button>
           </div>
@@ -137,12 +137,12 @@ export default { name: 'Incident' }
         <div v-if="selectedAlertIds.length" class="batch-toolbar">
           <span>已选择 {{ selectedAlertIds.length }} 条</span>
           <el-input v-model="batchForm.owner" size="small" placeholder="处理人" class="batch-owner" />
-          <el-button size="small" @click="batchAssign" :loading="batchLoading">批量分派</el-button>
-          <el-select v-model="batchForm.status" size="small" placeholder="状态" class="batch-select">
+          <el-button v-if="hasPerm('alert.assign')" size="small" @click="batchAssign" :loading="batchLoading">批量分派</el-button>
+          <el-select v-if="hasPerm('alert.status')" v-model="batchForm.status" size="small" placeholder="状态" class="batch-select">
             <el-option v-for="item in statusOptions.filter(option => option.value !== 'closed')" :key="item.value" :label="item.label" :value="item.value" />
           </el-select>
-          <el-button size="small" @click="batchChangeStatus" :loading="batchLoading">改状态</el-button>
-          <el-button size="small" @click="batchAddNote" :loading="batchLoading">批量备注</el-button>
+          <el-button v-if="hasPerm('alert.status')" size="small" @click="batchChangeStatus" :loading="batchLoading">改状态</el-button>
+          <el-button v-if="hasPerm('alert.note')" size="small" @click="batchAddNote" :loading="batchLoading">批量备注</el-button>
         </div>
 
         <el-table
@@ -194,8 +194,8 @@ export default { name: 'Incident' }
           </el-table-column>
           <el-table-column label="操作" width="120" fixed="right">
             <template #default="{ row }">
-              <el-button size="small" type="primary" link @click.stop="openEditAlert(row)">编辑</el-button>
-              <el-button size="small" type="primary" link @click.stop="openAssignDialog(row)">指派</el-button>
+              <el-button v-if="hasPerm('alert.edit')" size="small" type="primary" link @click.stop="openEditAlert(row)">编辑</el-button>
+              <el-button v-if="hasPerm('alert.assign')" size="small" type="primary" link @click.stop="openAssignDialog(row)">指派</el-button>
             </template>
           </el-table-column>
         </el-table>
@@ -245,12 +245,12 @@ export default { name: 'Incident' }
               </div>
             </div>
             <div class="detail-actions">
-              <el-button size="small" type="primary" plain @click="openEditAlert(selectedAlert.id)"><el-icon><Edit /></el-icon>编辑</el-button>
-              <el-button size="small" type="primary" plain @click="openAssignDialog(selectedAlert)"><el-icon><User /></el-icon>指派</el-button>
-              <el-button v-if="selectedAlert.status === 'closed'" size="small" type="danger" plain @click="openReopenDialog"><el-icon><RefreshRight /></el-icon>重新研判</el-button>
-              <el-button v-if="selectedAlert.status === 'closed'" size="small" type="warning" plain @click="openRejectDialog"><el-icon><RefreshLeft /></el-icon>驳回重判</el-button>
-              <el-button size="small" @click="exportMarkdown"><el-icon><Download /></el-icon>导出 Markdown</el-button>
-              <el-button size="small" type="danger" plain @click="removeSelected"><el-icon><Delete /></el-icon>删除</el-button>
+              <el-button v-if="hasPerm('alert.edit')" size="small" type="primary" plain @click="openEditAlert(selectedAlert.id)"><el-icon><Edit /></el-icon>编辑</el-button>
+              <el-button v-if="hasPerm('alert.assign')" size="small" type="primary" plain @click="openAssignDialog(selectedAlert)"><el-icon><User /></el-icon>指派</el-button>
+              <el-button v-if="selectedAlert.status === 'closed' && hasPerm('alert.reopen')" size="small" type="danger" plain @click="openReopenDialog"><el-icon><RefreshRight /></el-icon>重新研判</el-button>
+              <el-button v-if="selectedAlert.status === 'closed' && hasPerm('alert.reject')" size="small" type="warning" plain @click="openRejectDialog"><el-icon><RefreshLeft /></el-icon>驳回重判</el-button>
+              <el-button v-if="hasPerm('export')" size="small" @click="exportMarkdown"><el-icon><Download /></el-icon>导出 Markdown</el-button>
+              <el-button v-if="hasPerm('alert.delete')" size="small" type="danger" plain @click="removeSelected"><el-icon><Delete /></el-icon>删除</el-button>
             </div>
           </div>
 
@@ -279,7 +279,7 @@ export default { name: 'Incident' }
             </div>
             <div class="evidence-uploader">
               <input ref="attachmentInputRef" hidden type="file" multiple @change="handleAttachmentPick" />
-              <el-button size="small" type="primary" plain @click="attachmentInputRef?.click()">
+              <el-button v-if="hasPerm('attachment.write')" size="small" type="primary" plain @click="attachmentInputRef?.click()">
                 <el-icon><Upload /></el-icon>上传 / 粘贴截图
               </el-button>
               <el-button
@@ -366,7 +366,7 @@ export default { name: 'Incident' }
                   allow-create
                   default-first-option
                   size="small"
-                  :disabled="isClosed"
+                  :disabled="isClosed || !hasPerm('alert.assign')"
                   placeholder="选择或添加处理人（可多个）"
                   @change="saveHandlers"
                 >
@@ -388,8 +388,8 @@ export default { name: 'Incident' }
             <div v-if="responderHint" class="responder-hint">
               <span>已转入应急响应处置。当前处理人：<strong>{{ (selectedAlert.handlers || []).join('、') || '无' }}</strong>。真实攻击 / 安全事件通常需多团队协同，可拆分处置子任务分派各团队。</span>
               <div class="responder-hint-actions">
-                <el-button size="small" type="warning" @click="openSubtaskTab">拆分处置子任务</el-button>
-                <el-button size="small" @click="openResponderAssign">指派处置人</el-button>
+                <el-button v-if="hasPerm('subtask.manage')" size="small" type="warning" @click="openSubtaskTab">拆分处置子任务</el-button>
+                <el-button v-if="hasPerm('subtask.manage')" size="small" @click="openResponderAssign">指派处置人</el-button>
                 <el-button size="small" text @click="responderHint = false">暂不</el-button>
               </div>
             </div>
@@ -448,7 +448,7 @@ export default { name: 'Incident' }
                 </div>
               </div>
               <div class="research-submit-bar">
-                <el-button size="small" type="primary" :disabled="!researchDirty || researchReadonly" @click="submitResearch">提交研判信息</el-button>
+                <el-button size="small" type="primary" :disabled="!researchDirty || researchReadonly || !hasPerm('alert.conclude')" @click="submitResearch">提交研判信息</el-button>
               </div>
             </div>
           </div>
@@ -458,7 +458,7 @@ export default { name: 'Incident' }
               <span class="research-fill-title">处置子任务</span>
               <span v-if="(selectedAlert.subtasks || []).length" class="tab-count">{{ (selectedAlert.subtasks || []).length }}</span>
               <span class="subtask-optional">可选</span>
-              <el-button v-if="!subtaskAdding && !isClosed" size="small" type="primary" plain @click="openSubtaskAdd">
+              <el-button v-if="!subtaskAdding && !isClosed && hasPerm('subtask.manage')" size="small" type="primary" plain @click="openSubtaskAdd">
                 <el-icon><Plus /></el-icon>添加处置子任务
               </el-button>
             </div>
@@ -904,6 +904,7 @@ import {
   getIncidentOperations,
   getIncidentStats,
   getIncidentTemplates,
+  getAuthDirectory,
   listIncidentAlerts,
   setIncidentAlertConclusion,
   setIncidentAlertStatus,
@@ -921,6 +922,12 @@ import {
   ocrIncidentAlert,
   extractIncidentFields
 } from '../api'
+import { auth } from '../store/auth'
+
+// 按权限显隐/禁用操作入口（后端仍是强制校验，前端仅做体验）
+const hasPerm = (perm) => auth.hasPerm(perm)
+// 真实账号目录（指派选人候选）
+const directoryUsers = ref([])
 
 const statusOptions = [
   { value: 'new', label: '新建中' },
@@ -950,7 +957,7 @@ const queueOptions = [
   { value: 'unassigned', label: '未分派' },
   { value: 'closed', label: '已完成' }
 ]
-const currentUser = 'operator'
+const currentUser = auth.username || 'operator'
 
 const loading = ref(false)
 const submitting = ref(false)
@@ -1303,8 +1310,10 @@ const showSubtasks = computed(() => {
   return s.status === 'responding' || EVENT_CONCLUSIONS.includes(s.conclusion) || (s.subtasks || []).length > 0
 })
 
+// 指派候选：优先真实账号目录（用户名即 handler 归属键），并入历史出现过的姓名兜底
 const analystOptions = computed(() => {
   const set = new Set()
+  for (const u of directoryUsers.value || []) set.add(u.username)
   for (const a of alerts.value || []) {
     if (a.owner) set.add(a.owner)
     if (a.created_by) set.add(a.created_by)
@@ -1502,6 +1511,17 @@ async function loadTemplates() {
   }
 }
 
+// 指派选人目录：仅有指派/处置权限者能读取，失败静默降级为历史姓名候选
+async function loadDirectory() {
+  if (!auth.hasPerm('alert.assign') && !auth.hasPerm('subtask.manage')) return
+  try {
+    const res = await getAuthDirectory()
+    if (res.success) directoryUsers.value = res.data?.users || []
+  } catch (e) {
+    /* 静默：目录不可用时仍可用历史姓名/自由输入 */
+  }
+}
+
 function addOptionalField(key) {
   if (!selectedOptionalFieldKeys.value.includes(key)) {
     selectedOptionalFieldKeys.value.push(key)
@@ -1641,7 +1661,7 @@ function cleanupCreateAssets() {
 }
 
 async function refreshAll() {
-  await Promise.all([loadTemplates(), loadStats(), loadOperations(), loadAlerts()])
+  await Promise.all([loadTemplates(), loadStats(), loadOperations(), loadAlerts(), loadDirectory()])
 }
 
 async function loadStats() {
