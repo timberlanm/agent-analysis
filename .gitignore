@@ -38,3 +38,6 @@ Thumbs.db
 *.log
 flask.log
 flask_err.log
+
+# 内部文档（不对外公开）：开发工作计划 / 工时统计表
+开发工作计划*.xlsx
