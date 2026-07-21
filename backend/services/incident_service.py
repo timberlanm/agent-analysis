@@ -59,6 +59,7 @@ ACTIVE_STATUSES = {
     "assigned",
     "triaging",
     "investigating",
+    "responding",      # 应急响应中：仍在处理，属"处理中"（此前遗漏导致统计与列表都少算）
     "need_info",
     "waiting_info",
     "confirmed",
@@ -330,12 +331,16 @@ def _json_loads(value: Any, fallback: Any = None) -> Any:
 
 def _conn() -> sqlite3.Connection:
     _ensure_dirs()
-    conn = sqlite3.connect(DB_PATH, factory=ClosingConnection)
+    conn = sqlite3.connect(DB_PATH, factory=ClosingConnection, timeout=8.0)
     conn.row_factory = sqlite3.Row
+    # busy_timeout 必须最先设置:并发请求下拿不到锁时自旋等待(而非立即 database is locked → 500)。
+    conn.execute("PRAGMA busy_timeout = 8000")
     # Local single-process mode: this managed workspace rejects SQLite rollback
     # journal writes/renames. Production should move this store to PostgreSQL.
     conn.execute("PRAGMA journal_mode = OFF")
-    conn.execute("PRAGMA locking_mode = EXCLUSIVE")
+    # NORMAL 锁模式按事务释放锁,配合 Flask 多线程并发请求；EXCLUSIVE 会把锁持有到连接关闭,
+    # 让并发读写互相长时间阻塞。journal_mode=OFF 已避免回滚日志文件,与锁模式无关。
+    conn.execute("PRAGMA locking_mode = NORMAL")
     conn.execute("PRAGMA synchronous = NORMAL")
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
@@ -879,6 +884,24 @@ def _insert_external_attachment(
     )
 
 
+def _visibility_where(restrict_actor: Optional[str], include_unassigned: bool = False):
+    """构造「授权可见性」SQL 条件 (fragment, params)；restrict_actor 为空则不限制。
+    可见 = 本人经手/受指派(owner/created_by/handlers/子任务负责人)；
+    include_unassigned 时额外放行「待分配」= 无处理人 **且未完成/未升级** 的告警。"""
+    if not restrict_actor:
+        return "", []
+    cond = (
+        "owner = ? OR created_by = ? OR handlers LIKE ? "
+        "OR id IN (SELECT alert_id FROM subtasks WHERE assignee = ?)"
+    )
+    if include_unassigned:
+        cond += (
+            " OR ((handlers IS NULL OR handlers = '' OR handlers = '[]') "
+            "AND status NOT IN ('closed','escalated'))"
+        )
+    return "(" + cond + ")", [restrict_actor, restrict_actor, f'%"{restrict_actor}"%', restrict_actor]
+
+
 def list_alerts(filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     init_db()
     filters = filters or {}
@@ -928,13 +951,12 @@ def list_alerts(filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]
 
     # 授权可见性过滤(与研判逻辑无关):仅当调用方显式传入 restrict_to_actor 时生效,
     # 把结果限制为该账号「经手/受指派」的告警(owner/created_by/handlers/子任务负责人)。
-    restrict_actor = filters.get("restrict_to_actor")
-    if restrict_actor:
-        clauses.append(
-            "(owner = ? OR created_by = ? OR handlers LIKE ? "
-            "OR id IN (SELECT alert_id FROM subtasks WHERE assignee = ?))"
-        )
-        params.extend([restrict_actor, restrict_actor, f'%"{restrict_actor}"%', restrict_actor])
+    vis_sql, vis_params = _visibility_where(
+        filters.get("restrict_to_actor"), filters.get("include_unassigned")
+    )
+    if vis_sql:
+        clauses.append(vis_sql)
+        params.extend(vis_params)
 
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     limit = int(filters.get("limit") or 200)
@@ -2023,30 +2045,38 @@ def get_related_alerts(alert_id: str, limit: int = 20) -> List[Dict[str, Any]]:
     return correlation["related_alerts"]
 
 
-def get_stats() -> Dict[str, Any]:
+def get_stats(restrict_to_actor: Optional[str] = None, include_unassigned: bool = False) -> Dict[str, Any]:
+    """按调用者的告警队列可见性统计；restrict_to_actor 为空=看全部（如管理员）。"""
     init_db()
+    vis, vp = _visibility_where(restrict_to_actor, include_unassigned)
+    where = f" WHERE {vis}" if vis else ""
+    and_vis = f" AND {vis}" if vis else ""
     with _conn() as conn:
-        total = conn.execute("SELECT count(*) AS c FROM alerts").fetchone()["c"]
+        total = conn.execute(f"SELECT count(*) AS c FROM alerts{where}", vp).fetchone()["c"]
         by_status = {
             STATUS_VALUES.get(r["status"], r["status"]): r["c"]
-            for r in conn.execute("SELECT status, count(*) AS c FROM alerts GROUP BY status")
+            for r in conn.execute(f"SELECT status, count(*) AS c FROM alerts{where} GROUP BY status", vp)
         }
         by_severity = {
-            r["severity"]: r["c"] for r in conn.execute("SELECT severity, count(*) AS c FROM alerts GROUP BY severity")
+            r["severity"]: r["c"] for r in conn.execute(f"SELECT severity, count(*) AS c FROM alerts{where} GROUP BY severity", vp)
         }
         by_source = {
             r["source_system"] or "未知": r["c"]
-            for r in conn.execute("SELECT source_system, count(*) AS c FROM alerts GROUP BY source_system")
+            for r in conn.execute(f"SELECT source_system, count(*) AS c FROM alerts{where} GROUP BY source_system", vp)
         }
         by_category = {
             r["source_category"] or "other": r["c"]
-            for r in conn.execute("SELECT source_category, count(*) AS c FROM alerts GROUP BY source_category")
+            for r in conn.execute(f"SELECT source_category, count(*) AS c FROM alerts{where} GROUP BY source_category", vp)
         }
+        active_ph = ",".join(["?"] * len(ACTIVE_STATUSES))
         pending = conn.execute(
-            "SELECT count(*) AS c FROM alerts WHERE status IN ('new','pending','assigned','triaging','investigating','need_info','waiting_info','confirmed')"
+            f"SELECT count(*) AS c FROM alerts WHERE status IN ({active_ph})" + and_vis,
+            sorted(ACTIVE_STATUSES) + vp,
         ).fetchone()["c"]
+        closed_ph = ",".join(["?"] * len(CLOSED_STATUSES))
         unassigned = conn.execute(
-            "SELECT count(*) AS c FROM alerts WHERE (handlers IS NULL OR handlers = '' OR handlers = '[]') AND status NOT IN ('closed','escalated')"
+            f"SELECT count(*) AS c FROM alerts WHERE (handlers IS NULL OR handlers = '' OR handlers = '[]') AND status NOT IN ({closed_ph})" + and_vis,
+            sorted(CLOSED_STATUSES) + vp,
         ).fetchone()["c"]
     return {
         "total": total,

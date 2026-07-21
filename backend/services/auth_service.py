@@ -12,6 +12,7 @@
 """
 import hashlib
 import secrets
+import sqlite3
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -28,11 +29,10 @@ from backend.services.incident_service import (
 # code -> (显示名, 说明)
 BUILTIN_ROLES: List[Tuple[str, str, str]] = [
     ("admin", "系统管理员", "账号与系统治理,拥有全部权限"),
-    ("triage_lead", "研判主管", "分派/驳回/重研/监督,研判全流程"),
-    ("analyst", "研判员", "录入/研判/定性/流转/记录"),
-    ("responder", "应急处置人", "承接并更新应急处置子任务"),
-    ("auditor", "审计员", "只读 + 审计日志 + 导出"),
-    ("viewer", "只读访客", "只读告警"),
+    ("analyst", "研判人员", "研判告警与应急响应,研判全流程"),
+    ("responder", "应急处置人", "承接并执行各应急处置子任务"),
+    ("reporter", "上报人", "将安全设备告警填报进平台"),
+    ("liaison", "业务关联人", "提交与告警相关的系统信息"),
 ]
 
 ALL_PERMISSIONS = {
@@ -66,50 +66,73 @@ PERMISSION_CATALOG = [
 
 ROLE_PERMISSIONS: Dict[str, set] = {
     "admin": set(ALL_PERMISSIONS),
-    "triage_lead": {
+    # 研判人员：研判告警 + 应急响应，研判全流程 + 告警增删改（对象级豁免，可处理任意告警）
+    "analyst": {
         "alert.view", "alert.create", "alert.edit", "alert.delete", "alert.conclude",
         "alert.status", "alert.assign", "alert.reject", "alert.reopen", "alert.note",
         "alert.entity", "subtask.manage", "attachment.write", "ocr.run", "export",
-        "audit.view",
     },
-    "analyst": {
-        "alert.view", "alert.create", "alert.edit", "alert.conclude", "alert.status",
-        "alert.assign", "alert.note", "alert.entity", "subtask.manage",
-        "attachment.write", "ocr.run", "export",
-    },
+    # 应急处置人：执行应急处置子任务 + 对受指派告警的增删改（不含新建）
     "responder": {
-        "alert.view", "alert.note", "subtask.manage", "attachment.write", "ocr.run",
+        "alert.view", "alert.edit", "alert.delete", "alert.note", "alert.entity",
+        "subtask.manage", "attachment.write", "ocr.run",
     },
-    "auditor": {"alert.view", "export", "audit.view"},
-    "viewer": {"alert.view"},
+    # 上报人：填报告警（新建）+ 对本人上报告警的增删改
+    "reporter": {
+        "alert.view", "alert.create", "alert.edit", "alert.delete", "alert.note",
+        "alert.entity", "attachment.write", "ocr.run",
+    },
+    # 业务关联人：向告警提交相关系统信息（记录/实体/附件）+ 对关联告警的改删（不含新建）
+    "liaison": {
+        "alert.view", "alert.edit", "alert.delete", "alert.note", "alert.entity",
+        "attachment.write", "ocr.run",
+    },
 }
 
 # ============ 对象级授权（Phase 1：越权收敛） ============
-# 具备监督/管理职责的角色不受对象级限制（可处理任意告警）
-SCOPE_BYPASS_ROLES = {"admin", "triage_lead"}
+# 仅管理员不受对象级限制（可处理任意告警）；研判人员等均收敛到本人经手范围
+SCOPE_BYPASS_ROLES = {"admin"}
 
 # 每个角色对「对象级」权限的归属要求；未列出的权限=该角色拥有即可全局使用。
 #   'handler'  需为该告警 owner 或 handlers 成员（研判处理人）
 #   'assigned' 需为 handler 或该告警某处置子任务的 assignee（应急处置人语义）
 #   'self'     指派类：仅能增删本人（自领/自撤）
 ROLE_SCOPES = {
+    # 研判人员：只能对本人经手（自建/自领为处理人）的告警做编辑/研判/删除；可自领(assign=self)，不可改派他人
     "analyst": {
         "alert.edit": "handler",
+        "alert.delete": "handler",
         "alert.conclude": "handler",
         "alert.status": "handler",
         "alert.entity": "handler",
         "attachment.write": "handler",
         "subtask.manage": "handler",
+        "alert.reject": "handler",
+        "alert.reopen": "handler",
         "alert.assign": "self",
-        # alert.note 不列 -> 研判员可跨告警协作留痕，不受限
+        # alert.note 不列 -> 研判人员可跨告警协作留痕
     },
+    # 应急处置人：只能看/处置受指派（本人为处理人或某处置子任务的执行人）的告警
     "responder": {
         "alert.view": "assigned",
+        "alert.edit": "assigned",
+        "alert.delete": "assigned",
         "alert.note": "assigned",
+        "alert.entity": "assigned",
         "attachment.write": "assigned",
         "subtask.manage": "assigned",
     },
-    # admin / triage_lead：豁免；auditor / viewer：本就只读，无写权限
+    # 上报人：只能改/删本人上报（创建者=经手人）的告警；新建不受限，补充信息(记录/实体/附件)可跨告警
+    "reporter": {
+        "alert.edit": "handler",
+        "alert.delete": "handler",
+    },
+    # 业务关联人：只能改/删本人经手的告警；提交关联信息(记录/实体/附件)可跨告警
+    "liaison": {
+        "alert.edit": "handler",
+        "alert.delete": "handler",
+    },
+    # admin：对象级豁免（可处理任意告警）
 }
 
 # 归属宽松度排序：assigned ⊇ handler ⊇ self
@@ -120,6 +143,8 @@ MIN_PASSWORD_LEN = 8
 # 不启用「登录失败自动锁定」策略；失败尝试仍会记入审计(login_failed)以便排查。
 SESSION_IDLE_MINUTES = 60
 SESSION_ABSOLUTE_HOURS = 12
+# 会话最近活跃时间的写入节流阈值（秒）：并发页面加载时避免每个请求都写库抢锁。
+_LAST_SEEN_THROTTLE_SECONDS = 30
 VALID_STATUSES = {"active", "disabled"}
 SECRET_KEY_FILE = DATA_DIR / "secret_key"
 
@@ -223,6 +248,24 @@ def effective_scope(user: Dict[str, Any], permission: str) -> Optional[str]:
             return None  # 有角色无限制地授予 -> 全局放行
         scopes.append(sc)
     return max(scopes, key=lambda s: _SCOPE_RANK.get(s, 0))
+
+
+# ============ 告警队列读可见性（按角色，与写权限/对象级作用域相互独立） ============
+# all           = 看全部（管理员）
+# own+unassigned= 本人经手/上报 + 待分配(无处理人) 告警（上报人）
+# own           = 仅本人经手/受指派的告警（研判人员/业务关联人/应急处置人）
+QUEUE_SEE_ALL_ROLES = {"admin"}
+# 研判人员、上报人：除本人经手外，还能看待分配(无处理人)告警（研判人员可自领研判、上报人可追踪）
+QUEUE_SEE_UNASSIGNED_ROLES = {"reporter", "analyst"}
+
+
+def queue_visibility(user: Dict[str, Any]) -> str:
+    roles = set(_user_role_codes(user))
+    if roles & QUEUE_SEE_ALL_ROLES:
+        return "all"
+    if roles & QUEUE_SEE_UNASSIGNED_ROLES:
+        return "own+unassigned"
+    return "own"
 
 
 def ensure_secret_key() -> str:
@@ -350,6 +393,25 @@ def init_auth() -> None:
                     (_id("rol_"), code, name, description),
                 )
         _ = now
+        # —— 迁移到新角色模型（一次性、幂等）：清理弃用角色 + 重刷内置角色-权限 ——
+        builtin_codes = {c for c, _n, _d in BUILTIN_ROLES}
+        legacy = {r["code"] for r in conn.execute("SELECT code FROM roles").fetchall()} - builtin_codes
+        legacy |= {r["role_code"] for r in conn.execute("SELECT DISTINCT role_code FROM role_permissions").fetchall()} - builtin_codes
+        if legacy:
+            for code in sorted(legacy):
+                row = conn.execute("SELECT id FROM roles WHERE code = ?", (code,)).fetchone()
+                if row:
+                    conn.execute("DELETE FROM user_roles WHERE role_id = ?", (row["id"],))
+                    conn.execute("DELETE FROM roles WHERE code = ?", (code,))
+                conn.execute("DELETE FROM role_permissions WHERE role_code = ?", (code,))
+            # 角色模型变更：把内置角色的角色-权限重置为代码定义（覆盖旧默认，仅本次迁移执行）
+            for role_code, perms in ROLE_PERMISSIONS.items():
+                conn.execute("DELETE FROM role_permissions WHERE role_code = ?", (role_code,))
+                for perm in perms:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO role_permissions (role_code, permission_code) VALUES (?, ?)",
+                        (role_code, perm),
+                    )
 
 
 def _role_id(conn, code: str) -> Optional[str]:
@@ -661,23 +723,37 @@ def resolve_session(token: str) -> Optional[Dict[str, Any]]:
     if not token:
         return None
     now = datetime.now(timezone.utc)
+    # 只读事务读取会话，尽早释放共享锁；不要在同一事务里 SELECT 后再 UPDATE，
+    # 否则并发请求会「各持共享锁、又都想升独占锁」相互阻塞。
     with _conn() as conn:
         row = conn.execute("SELECT * FROM sessions WHERE token = ?", (token,)).fetchone()
-        if not row or row["revoked"]:
-            return None
-        expires = _parse_dt(row["expires_at"])
-        last_seen = _parse_dt(row["last_seen_at"])
-        if expires and now >= expires:
-            conn.execute("UPDATE sessions SET revoked = 1 WHERE token = ?", (token,))
-            return None
-        if last_seen and (now - last_seen) > timedelta(minutes=SESSION_IDLE_MINUTES):
-            conn.execute("UPDATE sessions SET revoked = 1 WHERE token = ?", (token,))
-            return None
-        user_id = row["user_id"]
-        conn.execute("UPDATE sessions SET last_seen_at = ? WHERE token = ?", (now.isoformat(), token))
-    user = get_user(user_id)
+    if not row or row["revoked"]:
+        return None
+    expires = _parse_dt(row["expires_at"])
+    last_seen = _parse_dt(row["last_seen_at"])
+    if (expires and now >= expires) or (
+        last_seen and (now - last_seen) > timedelta(minutes=SESSION_IDLE_MINUTES)
+    ):
+        # 过期/空闲超时：尽力吊销并拒绝（写失败也一律拒绝，安全侧默认拒绝）。
+        try:
+            with _conn() as conn:
+                conn.execute("UPDATE sessions SET revoked = 1 WHERE token = ?", (token,))
+        except sqlite3.OperationalError:
+            pass
+        return None
+    user = get_user(row["user_id"])
     if not user or user["status"] != "active":
         return None
+    # 刷新最近活跃时间：节流（避免每个请求都写库）+ 尽力而为（锁争用时跳过而非 500）。
+    if (not last_seen) or (now - last_seen).total_seconds() >= _LAST_SEEN_THROTTLE_SECONDS:
+        try:
+            with _conn() as conn:
+                conn.execute(
+                    "UPDATE sessions SET last_seen_at = ? WHERE token = ?",
+                    (now.isoformat(), token),
+                )
+        except sqlite3.OperationalError:
+            pass
     return user
 
 

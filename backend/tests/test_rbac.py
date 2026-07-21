@@ -43,25 +43,41 @@ def test_login_and_basic_gating(rbac):
 # ============ Phase 1：对象级越权收敛 ============
 
 def test_object_scope_writes(rbac):
-    rbac.create_user("lead", ["triage_lead"])
+    rbac.create_user("root", ["admin"])   # 仅管理员对象级豁免
+    rbac.create_user("repA", ["reporter"])
+    rbac.create_user("repB", ["reporter"])
+    root, a, b = rbac.login("root"), rbac.login("repA"), rbac.login("repB")
+
+    aid = _new_alert(a, "A 上报的告警")
+    # repB 不能改/删 A 上报的告警（对象级限制）
+    assert b.put(f"/api/incident/alerts/{aid}", json={"title": "x"}).status_code == 403
+    assert b.delete(f"/api/incident/alerts/{aid}").status_code == 403
+    # repA 能改自己上报的
+    assert a.put(f"/api/incident/alerts/{aid}", json={"title": "改自己的"}).status_code == 200
+    # 管理员豁免对象级，可改任意告警
+    assert root.put(f"/api/incident/alerts/{aid}", json={"title": "管理员改"}).status_code == 200
+
+
+def test_analyst_scope(rbac):
+    rbac.create_user("root", ["admin"])
     rbac.create_user("anaA", ["analyst"])
     rbac.create_user("anaB", ["analyst"])
-    lead, a, b = rbac.login("lead"), rbac.login("anaA"), rbac.login("anaB")
-
-    aid = _new_alert(a, "A 的告警")
-    # anaB 不能改 A 的告警
+    root, a, b = rbac.login("root"), rbac.login("anaA"), rbac.login("anaB")
+    aid = _new_alert(root, "待分配")  # 无处理人
+    # 研判人员能看到待分配（own+unassigned），可自行领取
+    assert aid in {x["id"] for x in a.get("/api/incident/alerts").get_json()["data"]["alerts"]}
+    # 未领取前不能改（对象级收敛，非本人经手）
     assert b.put(f"/api/incident/alerts/{aid}", json={"title": "x"}).status_code == 403
-    assert b.post(f"/api/incident/alerts/{aid}/conclusion", json={"conclusion": "business"}).status_code == 403
-    # anaB 不能改派他人，但可自领
-    assert b.put(f"/api/incident/alerts/{aid}/handlers", json={"names": ["other"]}).status_code == 403
-    assert b.put(f"/api/incident/alerts/{aid}/handlers", json={"names": ["anaB"]}).status_code == 200
-    assert b.put(f"/api/incident/alerts/{aid}", json={"title": "接手后"}).status_code == 200
-    # lead 豁免对象级
-    assert lead.put(f"/api/incident/alerts/{aid}", json={"title": "lead 改"}).status_code == 200
+    # 自领（assign=self）后可研判/编辑
+    assert a.put(f"/api/incident/alerts/{aid}/handlers", json={"names": ["anaA"]}).status_code == 200
+    assert a.put(f"/api/incident/alerts/{aid}", json={"title": "研判中"}).status_code == 200
+    assert a.post(f"/api/incident/alerts/{aid}/conclusion", json={"conclusion": "business"}).status_code == 200
+    # 不能改派他人
+    assert a.put(f"/api/incident/alerts/{aid}/handlers", json={"names": ["other"]}).status_code == 403
 
 
 def test_responder_scope(rbac):
-    rbac.create_user("lead", ["triage_lead"])
+    rbac.create_user("lead", ["admin"])
     rbac.create_user("resp", ["responder"])
     lead, resp = rbac.login("lead"), rbac.login("resp")
     aid = _new_alert(lead, "待处置")
@@ -76,23 +92,34 @@ def test_responder_scope(rbac):
 # ============ Phase 2：读范围收敛 ============
 
 def test_read_scope(rbac):
-    rbac.create_user("lead", ["triage_lead"])
-    rbac.create_user("anaA", ["analyst"])
+    rbac.create_user("root", ["admin"])
+    rbac.create_user("ana", ["analyst"])
     rbac.create_user("resp", ["responder"])
-    lead, a, resp = rbac.login("lead"), rbac.login("anaA"), rbac.login("resp")
-    a1 = _new_alert(lead, "分派给处置人")
-    a2 = _new_alert(a, "无关告警")
-    lead.put(f"/api/incident/alerts/{a1}/handlers", json={"names": ["resp"]})
+    rbac.create_user("rep", ["reporter"])
+    root, ana, resp, rep = rbac.login("root"), rbac.login("ana"), rbac.login("resp"), rbac.login("rep")
+    a1 = _new_alert(root, "已分派给处置人")     # root 建，随后指派 resp
+    a2 = _new_alert(ana, "研判自建/待分配")     # ana 建（创建者=经手），无处理人
+    root.put(f"/api/incident/alerts/{a1}/handlers", json={"names": ["resp"]})
 
-    ids = [x["id"] for x in resp.get("/api/incident/alerts").get_json()["data"]["alerts"]]
-    assert ids == [a1]
+    # 应急处置人：只看受指派（a1）
+    resp_ids = [x["id"] for x in resp.get("/api/incident/alerts").get_json()["data"]["alerts"]]
+    assert resp_ids == [a1]
     assert resp.get(f"/api/incident/alerts/{a1}").status_code == 200
     assert resp.get(f"/api/incident/alerts/{a2}").status_code == 403
     for sub in ["notes", "entities", "attachments", "subtasks", "related", "correlation"]:
         assert resp.get(f"/api/incident/alerts/{a2}/{sub}").status_code == 403
-    # analyst 不受读限
-    ana_ids = {x["id"] for x in a.get("/api/incident/alerts").get_json()["data"]["alerts"]}
-    assert {a1, a2} <= ana_ids
+
+    # 研判人员：只看本人经手（a2 自建），看不到别人经手的 a1
+    ana_ids = {x["id"] for x in ana.get("/api/incident/alerts").get_json()["data"]["alerts"]}
+    assert a2 in ana_ids and a1 not in ana_ids
+
+    # 上报人：本人经手 + 待分配；a1 已有处理人(resp)且非本人→不可见，a2 待分配→可见
+    rep_ids = {x["id"] for x in rep.get("/api/incident/alerts").get_json()["data"]["alerts"]}
+    assert a2 in rep_ids and a1 not in rep_ids
+
+    # 管理员：看全部
+    root_ids = {x["id"] for x in root.get("/api/incident/alerts").get_json()["data"]["alerts"]}
+    assert {a1, a2} <= root_ids
 
 
 # ============ Phase 1：服务令牌 ============
@@ -159,23 +186,23 @@ def test_no_lockout(rbac):
 
 def test_configurable_permissions(rbac):
     rbac.create_user("root", ["admin"])
-    rbac.create_user("v", ["viewer"])
+    rbac.create_user("v", ["liaison"])
     root = rbac.login("root")
 
-    # 默认：viewer 只读，导出被拒
+    # 默认：liaison 无导出权限
     v = rbac.login("v")
     assert v.get("/api/incident/alerts").status_code == 200
     assert v.get("/api/incident/export").status_code == 403
 
-    # 管理员给 viewer 赋 export 权限
-    r = root.put("/api/auth/roles/viewer/permissions", json={"permissions": ["alert.view", "export"]})
+    # 管理员给 liaison 赋 export 权限
+    r = root.put("/api/auth/roles/liaison/permissions", json={"permissions": ["alert.view", "export"]})
     assert r.status_code == 200
-    # 该 viewer 重新登录后即拥有 export
+    # 该 liaison 重新登录后即拥有 export
     v2 = rbac.login("v")
     assert v2.get("/api/incident/export").status_code == 200
 
     # 收回 export
-    root.put("/api/auth/roles/viewer/permissions", json={"permissions": ["alert.view"]})
+    root.put("/api/auth/roles/liaison/permissions", json={"permissions": ["alert.view"]})
     assert rbac.login("v").get("/api/incident/export").status_code == 403
 
     # admin 角色不可改

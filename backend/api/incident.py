@@ -95,16 +95,30 @@ def _handler_change_allowed(alert: dict, new_names):
     return True, None
 
 
+def _queue_vis() -> str:
+    """当前用户的告警队列可见性：all / own+unassigned / own。"""
+    return auth_service.queue_visibility(current_user())
+
+
+def _is_unassigned(alert: dict) -> bool:
+    return not (alert.get("handlers") or [])
+
+
 def _read_restricted() -> bool:
-    """当前用户的读可见性是否被收敛到「受指派」范围（如仅应急处置人角色）。"""
-    return auth_service.effective_scope(current_user(), "alert.view") == "assigned"
+    """当前用户的告警队列是否被收敛（非「看全部」即受限）。"""
+    return _queue_vis() != "all"
 
 
 def _read_ok(alert: dict) -> bool:
-    """读可见性判定：未受限则放行；受限则须为该告警经手/受指派者。"""
-    if not _read_restricted():
+    """读可见性判定：看全部放行；否则须为经手/受指派者；上报人另可见待分配告警。"""
+    vis = _queue_vis()
+    if vis == "all":
         return True
-    return _is_assigned(alert, current_user()["username"])
+    if _is_assigned(alert, current_user()["username"]):
+        return True
+    if vis == "own+unassigned" and _is_unassigned(alert):
+        return True
+    return False
 
 
 def _read_forbidden():
@@ -127,9 +141,11 @@ def list_alerts():
         "limit": request.args.get("limit", 200),
         "offset": request.args.get("offset", 0),
     }
-    # 读受限角色（如应急处置人）只可见本人经手/受指派的告警
-    if _read_restricted():
+    # 队列读可见性：非「看全部」的角色只可见本人经手/受指派的告警；上报人另可见待分配
+    vis = _queue_vis()
+    if vis != "all":
         filters["restrict_to_actor"] = current_user()["username"]
+        filters["include_unassigned"] = (vis == "own+unassigned")
     alerts = incident_service.list_alerts(filters)
     return jsonify({"success": True, "data": {"alerts": alerts, "count": len(alerts)}})
 
@@ -201,6 +217,11 @@ def update_alert(alert_id):
 @incident_bp.route("/alerts/<alert_id>", methods=["DELETE"])
 @require_perm("alert.delete")
 def delete_alert(alert_id):
+    existing = incident_service.get_alert(alert_id)
+    if not existing:
+        return jsonify({"success": False, "error": "告警不存在"}), 404
+    if not _scope_ok(existing, "alert.delete"):
+        return _scope_forbidden()
     ok = incident_service.delete_alert(alert_id, actor=_actor())
     if not ok:
         return jsonify({"success": False, "error": "告警不存在"}), 404
@@ -597,7 +618,10 @@ def export_alert(alert_id):
 
 @incident_bp.route("/stats", methods=["GET"])
 def get_stats():
-    return jsonify({"success": True, "data": incident_service.get_stats()})
+    vis = _queue_vis()
+    restrict = None if vis == "all" else current_user()["username"]
+    include_unassigned = (vis == "own+unassigned")
+    return jsonify({"success": True, "data": incident_service.get_stats(restrict, include_unassigned)})
 
 
 @incident_bp.route("/operations/summary", methods=["GET"])

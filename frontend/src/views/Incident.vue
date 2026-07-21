@@ -4,11 +4,20 @@ export default { name: 'Incident' }
 
 <template>
   <div class="analysis-page">
+    <div class="ops-collapse" :class="{ 'ops-collapse--hidden': opsHidden }">
     <div class="operations-panel kibana-panel">
       <div class="operations-header">
-        <div>
-          <div class="panel-title">运营概览</div>
-          <div class="panel-subtitle">近 {{ operationDays }} 天告警闭环和人员负载</div>
+        <div class="panel-title ops-title">运营概览</div>
+        <div class="ops-compact">
+          <span>总数 <strong>{{ stats.total || 0 }}</strong></span>
+          <span>待分配 <strong>{{ stats.by_status?.['待分配'] || 0 }}</strong></span>
+          <span>研判中 <strong>{{ stats.by_status?.['研判中'] || 0 }}</strong></span>
+          <span>应急响应中 <strong>{{ stats.by_status?.['应急响应中'] || 0 }}</strong></span>
+          <span>已完成 <strong>{{ stats.by_status?.['已完成'] || 0 }}</strong></span>
+          <span class="ops-compact-sep">近{{ operationDays }}天</span>
+          <span>新增 <strong>{{ operations.summary?.created || 0 }}</strong></span>
+          <span>关闭 <strong>{{ operations.summary?.closed || 0 }}</strong></span>
+          <span>平均关闭 <strong>{{ operations.summary?.avg_close_hours || 0 }}h</strong></span>
         </div>
         <div class="operations-actions">
           <el-select v-model="operationDays" size="small" @change="loadOperations">
@@ -19,40 +28,9 @@ export default { name: 'Incident' }
           <el-button v-if="hasPerm('export')" size="small" @click="exportOperationsCsv">
             <el-icon><Download /></el-icon>导出报表
           </el-button>
-          <el-button size="small" text @click="toggleOps">
-            {{ opsCollapsed ? '展开明细' : '收起' }}
-            <el-icon class="el-icon--right"><component :is="opsCollapsed ? 'ArrowDown' : 'ArrowUp'" /></el-icon>
-          </el-button>
         </div>
       </div>
-      <div class="ops-compact">
-        <span>总数 <strong>{{ stats.total || 0 }}</strong></span>
-        <span>待分配 <strong>{{ stats.by_status?.['待分配'] || 0 }}</strong></span>
-        <span>研判中 <strong>{{ stats.by_status?.['研判中'] || 0 }}</strong></span>
-        <span>已完成 <strong>{{ stats.by_status?.['已完成'] || 0 }}</strong></span>
-        <span class="ops-compact-sep">近{{ operationDays }}天</span>
-        <span>新增 <strong>{{ operations.summary?.created || 0 }}</strong></span>
-        <span>关闭 <strong>{{ operations.summary?.closed || 0 }}</strong></span>
-        <span>平均关闭 <strong>{{ operations.summary?.avg_close_hours || 0 }}h</strong></span>
-      </div>
-      <div v-show="!opsCollapsed" class="operations-grid">
-        <div class="ops-list">
-          <span>负责人负载</span>
-          <div v-for="item in (operations.owner_workload || []).slice(0, 4)" :key="item.owner">
-            <strong>{{ item.owner }}</strong>
-            <em>{{ item.active }} 待办</em>
-          </div>
-          <div v-if="!operations.owner_workload?.length" class="empty-inline">暂无待办</div>
-        </div>
-        <div class="ops-list">
-          <span>来源排行</span>
-          <div v-for="item in (operations.source_rank || []).slice(0, 4)" :key="item.name">
-            <strong>{{ item.name }}</strong>
-            <em>{{ item.count }} 条</em>
-          </div>
-          <div v-if="!operations.source_rank?.length" class="empty-inline">暂无数据</div>
-        </div>
-      </div>
+    </div>
     </div>
 
     <div class="analysis-main">
@@ -72,21 +50,8 @@ export default { name: 'Incident' }
           </div>
         </div>
         <div class="panel-header">
-          <div class="panel-heading">
+          <div class="panel-heading-row">
             <div class="panel-title">告警队列</div>
-            <div class="panel-subtitle">多源安全告警录入、分派、研判、关联和留痕</div>
-          </div>
-          <div class="queue-tabs">
-            <button
-              v-for="item in queueOptions"
-              :key="item.value"
-              type="button"
-              :class="{ active: filters.queue === item.value }"
-              @click="switchQueue(item.value)"
-            >
-              {{ item.label }}
-              <strong v-if="queueCount(item.value) !== null">{{ queueCount(item.value) }}</strong>
-            </button>
           </div>
           <div class="panel-actions">
             <el-input
@@ -146,6 +111,7 @@ export default { name: 'Incident' }
         </div>
 
         <el-table
+          ref="alertTableRef"
           :data="alerts"
           height="100%"
           class="alert-table"
@@ -194,7 +160,11 @@ export default { name: 'Incident' }
           </el-table-column>
           <el-table-column label="操作" width="120" fixed="right">
             <template #default="{ row }">
-              <el-button v-if="hasPerm('alert.edit')" size="small" type="primary" link @click.stop="openEditAlert(row)">编辑</el-button>
+              <el-tooltip :disabled="row.status !== 'closed'" content="已完成告警不可编辑，请先『重新研判』" placement="top">
+                <span>
+                  <el-button v-if="hasPerm('alert.edit')" size="small" type="primary" link :disabled="row.status === 'closed'" @click.stop="openEditAlert(row)">编辑</el-button>
+                </span>
+              </el-tooltip>
               <el-button v-if="hasPerm('alert.assign')" size="small" type="primary" link @click.stop="openAssignDialog(row)">指派</el-button>
             </template>
           </el-table-column>
@@ -245,7 +215,11 @@ export default { name: 'Incident' }
               </div>
             </div>
             <div class="detail-actions">
-              <el-button v-if="hasPerm('alert.edit')" size="small" type="primary" plain @click="openEditAlert(selectedAlert.id)"><el-icon><Edit /></el-icon>编辑</el-button>
+              <el-tooltip :disabled="!isClosed" content="已完成告警不可编辑，请先『重新研判』" placement="bottom">
+                <span>
+                  <el-button v-if="hasPerm('alert.edit')" size="small" type="primary" plain :disabled="isClosed" @click="openEditAlert(selectedAlert.id)"><el-icon><Edit /></el-icon>编辑</el-button>
+                </span>
+              </el-tooltip>
               <el-button v-if="hasPerm('alert.assign')" size="small" type="primary" plain @click="openAssignDialog(selectedAlert)"><el-icon><User /></el-icon>指派</el-button>
               <el-button v-if="selectedAlert.status === 'closed' && hasPerm('alert.reopen')" size="small" type="danger" plain @click="openReopenDialog"><el-icon><RefreshRight /></el-icon>重新研判</el-button>
               <el-button v-if="selectedAlert.status === 'closed' && hasPerm('alert.reject')" size="small" type="warning" plain @click="openRejectDialog"><el-icon><RefreshLeft /></el-icon>驳回重判</el-button>
@@ -886,7 +860,7 @@ export default { name: 'Incident' }
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowLeft, ArrowRight, Close, Delete, Document, Download, Plus, Refresh, Search, Upload } from '@element-plus/icons-vue'
 import {
@@ -970,11 +944,6 @@ const detailDialogVisible = ref(false)
 const stats = ref({})
 const operations = ref({})
 const operationDays = ref(7)
-const opsCollapsed = ref(localStorage.getItem('ops_collapsed') !== '0')
-function toggleOps() {
-  opsCollapsed.value = !opsCollapsed.value
-  localStorage.setItem('ops_collapsed', opsCollapsed.value ? '1' : '0')
-}
 const activeTab = ref('assignments')
 const filters = ref({ keyword: '', status: '', severity: '', source_category: '', reporter: '', owner: '', queue: 'all', current_user: currentUser })
 const flowForm = ref({ status: '', conclusion: '' })
@@ -2615,36 +2584,80 @@ async function exportOperationsCsv() {
   }
 }
 
-onMounted(refreshAll)
+// —— 运营概览「滚动隐藏」：浏览告警队列向下滚动时收起顶部运营概览，向上滚动 / 回到顶部时恢复 ——
+const alertTableRef = ref(null)
+const opsHidden = ref(false)
+let opsScrollEl = null
+let opsLastTop = 0
+
+function handleQueueScroll() {
+  if (!opsScrollEl) return
+  const top = opsScrollEl.scrollTop
+  if (top <= 4) {
+    opsHidden.value = false             // 回到顶部：恢复显示
+  } else if (top > opsLastTop + 4 && top > 40) {
+    opsHidden.value = true              // 向下滚动且已滚过 40px：收起
+  } else if (top < opsLastTop - 4) {
+    opsHidden.value = false             // 向上滚动：恢复
+  }
+  opsLastTop = top
+}
+
+function bindQueueScroll() {
+  const el = (alertTableRef.value && alertTableRef.value.$el
+    && alertTableRef.value.$el.querySelector('.el-scrollbar__wrap'))
+    || document.querySelector('.alert-table .el-scrollbar__wrap')
+  if (el && el !== opsScrollEl) {
+    if (opsScrollEl) opsScrollEl.removeEventListener('scroll', handleQueueScroll)
+    opsScrollEl = el
+    opsLastTop = el.scrollTop
+    el.addEventListener('scroll', handleQueueScroll, { passive: true })
+  }
+}
+
+// 列表数据变化后（首次渲染 / 重新查询）：复位为显示并（重新）确认滚动容器
+watch(alerts, () => {
+  opsHidden.value = false
+  opsLastTop = 0
+  nextTick(bindQueueScroll)
+})
+
+onMounted(() => {
+  refreshAll()
+  nextTick(bindQueueScroll)
+})
+
+onBeforeUnmount(() => {
+  if (opsScrollEl) opsScrollEl.removeEventListener('scroll', handleQueueScroll)
+})
 </script>
 
 <style scoped>
-.analysis-page { display: flex; flex-direction: column; gap: 12px; height: 100%; min-height: 0; }
+.analysis-page { display: flex; flex-direction: column; height: 100%; min-height: 0; }
 .kibana-panel { background: #fff; border: 1px solid #D3DAE6; border-radius: 6px; overflow: hidden; }
+/* 运营概览「滚动隐藏」：grid-template-rows 1fr→0fr 按真实高度平滑收合，隐藏时连同 8px 间距一起归零 */
+.ops-collapse { display: grid; grid-template-rows: 1fr; margin-bottom: 8px; min-height: 0; transition: grid-template-rows .26s ease, margin-bottom .26s ease, opacity .2s ease; }
+.ops-collapse > .operations-panel { min-height: 0; overflow: hidden; }
+.ops-collapse--hidden { grid-template-rows: 0fr; margin-bottom: 0; opacity: 0; pointer-events: none; }
 .stats-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
 .stat-card { background: #fff; border: 1px solid #D3DAE6; border-radius: 6px; padding: 12px 14px; display: flex; flex-direction: column; gap: 4px; }
 .stat-label { color: #69707D; font-size: 12px; }
 .stat-card strong { font-size: 24px; color: #1B1D21; }
 .operations-panel { display: flex; flex-direction: column; }
-.operations-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; padding: 10px 12px; border-bottom: 1px solid #E8EDF3; }
+.operations-header { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 16px; padding: 6px 12px; border-bottom: 1px solid #E8EDF3; }
+.ops-title { flex-shrink: 0; }
 .operations-actions { display: flex; align-items: center; gap: 8px; }
 .operations-actions .el-select { width: 110px; }
-.operations-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; padding: 4px 12px 10px; }
-.ops-compact { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 20px; padding: 8px 14px; }
+.ops-compact { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 18px; padding: 0; flex: 1 1 auto; min-width: 0; }
 .ops-compact span { color: #69707D; font-size: 13px; }
 .ops-compact strong { color: #1B1D21; font-size: 15px; margin-left: 4px; }
 .ops-compact-sep { color: #B4BAC4; font-size: 12px; border-left: 1px solid #E8EDF3; padding-left: 20px; }
-.ops-metric, .ops-list { border: 1px solid #E8EDF3; border-radius: 6px; background: #FAFBFD; padding: 8px 10px; min-width: 0; }
-.ops-metric span, .ops-list > span { display: block; color: #69707D; font-size: 12px; margin-bottom: 5px; }
-.ops-metric strong { display: block; color: #1B1D21; font-size: 18px; }
-.ops-list div { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: #1B1D21; font-size: 12px; line-height: 1.8; }
-.ops-list strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ops-list em { color: #69707D; font-style: normal; flex-shrink: 0; }
 .empty-inline { color: #8B92A0; justify-content: flex-start !important; }
 .analysis-main { display: flex; flex: 1; min-height: 0; }
 .analysis-list { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
-.panel-header { padding: 10px 12px; border-bottom: 1px solid #E8EDF3; display: flex; align-items: flex-start; flex-direction: column; gap: 10px; }
+.panel-header { padding: 8px 12px; border-bottom: 1px solid #E8EDF3; display: flex; flex-direction: row; align-items: center; flex-wrap: wrap; gap: 8px 16px; }
 .panel-heading { flex-shrink: 0; }
+.panel-heading-row { display: flex; align-items: center; justify-content: flex-start; gap: 16px; flex-shrink: 0; }
 .panel-title { font-weight: 700; color: #1B1D21; }
 .analysis-list { position: relative; }
 .analysis-list.list-dragging { outline: 2px dashed #006DE0; outline-offset: -4px; }
@@ -2653,12 +2666,12 @@ onMounted(refreshAll)
 .list-drop-card .el-icon { font-size: 42px; }
 .list-drop-card small { font-weight: 400; color: #5A6069; font-size: 12px; }
 .panel-subtitle { margin-top: 3px; color: #69707D; font-size: 12px; }
-.queue-tabs { display: flex; flex-wrap: wrap; gap: 6px; width: 100%; }
+.queue-tabs { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-start; }
 .queue-tabs button { border: 1px solid #D3DAE6; border-radius: 4px; background: #fff; color: #5A6069; cursor: pointer; padding: 5px 8px; display: inline-flex; align-items: center; gap: 6px; font-size: 12px; }
 .queue-tabs button:hover { border-color: #006DE0; color: #006DE0; }
 .queue-tabs button.active { background: #E8F1FC; border-color: #006DE0; color: #006DE0; font-weight: 700; }
 .queue-tabs strong { font-size: 11px; color: inherit; }
-.panel-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; width: 100%; }
+.panel-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; flex: 1 1 auto; min-width: 0; }
 .panel-actions > .el-select { width: 130px; }
 .filter-keyword { width: 230px; }
 .filter-person { width: 110px; }
@@ -2921,14 +2934,12 @@ onMounted(refreshAll)
 :global(.alert-detail-dialog .el-dialog__body) { flex: 1; min-height: 0; overflow: auto; padding: 0 !important; }
 @media (max-width: 1180px) {
   .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .operations-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .panel-actions { justify-content: flex-start; }
 }
 @media (max-width: 720px) {
   .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .operations-header { flex-direction: column; }
   .operations-actions { width: 100%; flex-wrap: wrap; }
-  .operations-grid { grid-template-columns: 1fr; }
   .filter-keyword { width: 100%; }
   .filter-person { width: 100%; }
   .panel-actions > .el-select { flex: 1 1 130px; }
