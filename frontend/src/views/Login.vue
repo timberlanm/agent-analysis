@@ -40,7 +40,7 @@
             </el-input>
           </el-form-item>
           <el-form-item>
-            <el-input v-model="pwForm.newPassword" type="password" placeholder="新口令（至少 8 位）" size="large"
+            <el-input v-model="pwForm.newPassword" type="password" placeholder="新口令（至少 12 位）" size="large"
                       show-password autocomplete="new-password">
               <template #prefix><el-icon><Key /></el-icon></template>
             </el-input>
@@ -76,7 +76,7 @@ const form = reactive({ username: '', password: '' })
 const pwForm = reactive({ oldPassword: '', newPassword: '', confirm: '' })
 const loading = ref(false)
 const error = ref('')
-const mustChange = ref(false)
+const mustChange = ref(auth.mustChangePassword)
 
 function proceed() {
   const redirect = route.query.redirect
@@ -106,8 +106,8 @@ async function onLogin() {
 }
 
 async function onChangePassword() {
-  if (pwForm.newPassword.length < 8) {
-    error.value = '新口令长度至少 8 位'
+  if (pwForm.newPassword.length < 12) {
+    error.value = '新口令长度至少 12 位'
     return
   }
   if (pwForm.newPassword !== pwForm.confirm) {

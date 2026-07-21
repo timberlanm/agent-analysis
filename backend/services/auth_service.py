@@ -38,7 +38,7 @@ BUILTIN_ROLES: List[Tuple[str, str, str]] = [
 ALL_PERMISSIONS = {
     "alert.view", "alert.create", "alert.edit", "alert.delete", "alert.conclude",
     "alert.status", "alert.assign", "alert.reject", "alert.reopen", "alert.note",
-    "alert.entity", "subtask.manage", "attachment.write", "ocr.run", "export",
+    "alert.entity", "subtask.manage", "subtask.execute", "attachment.write", "ocr.run", "export",
     "audit.view", "system.manage", "data.clear",
 }
 
@@ -58,6 +58,7 @@ PERMISSION_CATALOG = [
     ("alert.reopen", "重新研判", "研判"),
     ("alert.note", "研判记录", "研判"),
     ("subtask.manage", "处置子任务", "应急"),
+    ("subtask.execute", "执行本人子任务", "应急"),
     ("export", "数据导出", "系统"),
     ("audit.view", "查看审计", "系统"),
     ("system.manage", "用户/角色管理", "系统"),
@@ -66,25 +67,25 @@ PERMISSION_CATALOG = [
 
 ROLE_PERMISSIONS: Dict[str, set] = {
     "admin": set(ALL_PERMISSIONS),
-    # 研判人员：研判告警 + 应急响应，研判全流程 + 告警增删改（对象级豁免，可处理任意告警）
+    # 研判人员：在本人经手或主动认领范围内完成研判全流程与应急协作
     "analyst": {
-        "alert.view", "alert.create", "alert.edit", "alert.delete", "alert.conclude",
+        "alert.view", "alert.create", "alert.edit", "alert.conclude",
         "alert.status", "alert.assign", "alert.reject", "alert.reopen", "alert.note",
         "alert.entity", "subtask.manage", "attachment.write", "ocr.run", "export",
     },
-    # 应急处置人：执行应急处置子任务 + 对受指派告警的增删改（不含新建）
+    # 应急处置人：执行处置子任务，并维护本人受指派的告警信息
     "responder": {
-        "alert.view", "alert.edit", "alert.delete", "alert.note", "alert.entity",
-        "subtask.manage", "attachment.write", "ocr.run",
+        "alert.view", "alert.edit", "alert.note", "alert.entity",
+        "subtask.execute", "attachment.write", "ocr.run",
     },
-    # 上报人：填报告警（新建）+ 对本人上报告警的增删改
+    # 上报人：填报告警，并维护本人上报的告警
     "reporter": {
-        "alert.view", "alert.create", "alert.edit", "alert.delete", "alert.note",
+        "alert.view", "alert.create", "alert.edit", "alert.note",
         "alert.entity", "attachment.write", "ocr.run",
     },
-    # 业务关联人：向告警提交相关系统信息（记录/实体/附件）+ 对关联告警的改删（不含新建）
+    # 业务关联人：维护本人经手告警中的记录、实体和附件
     "liaison": {
-        "alert.view", "alert.edit", "alert.delete", "alert.note", "alert.entity",
+        "alert.view", "alert.edit", "alert.note", "alert.entity",
         "attachment.write", "ocr.run",
     },
 }
@@ -98,10 +99,10 @@ SCOPE_BYPASS_ROLES = {"admin"}
 #   'assigned' 需为 handler 或该告警某处置子任务的 assignee（应急处置人语义）
 #   'self'     指派类：仅能增删本人（自领/自撤）
 ROLE_SCOPES = {
-    # 研判人员：只能对本人经手（自建/自领为处理人）的告警做编辑/研判/删除；可自领(assign=self)，不可改派他人
+    # 研判人员：只能处理本人经手（自建/自领）的告警；可自领或退出本人，不可改派他人
     "analyst": {
+        "alert.view": "handler",
         "alert.edit": "handler",
-        "alert.delete": "handler",
         "alert.conclude": "handler",
         "alert.status": "handler",
         "alert.entity": "handler",
@@ -110,27 +111,35 @@ ROLE_SCOPES = {
         "alert.reject": "handler",
         "alert.reopen": "handler",
         "alert.assign": "self",
-        # alert.note 不列 -> 研判人员可跨告警协作留痕
+        "alert.note": "handler",
+        "ocr.run": "handler",
     },
     # 应急处置人：只能看/处置受指派（本人为处理人或某处置子任务的执行人）的告警
     "responder": {
         "alert.view": "assigned",
         "alert.edit": "assigned",
-        "alert.delete": "assigned",
         "alert.note": "assigned",
         "alert.entity": "assigned",
         "attachment.write": "assigned",
-        "subtask.manage": "assigned",
+        "subtask.execute": "assigned",
     },
-    # 上报人：只能改/删本人上报（创建者=经手人）的告警；新建不受限，补充信息(记录/实体/附件)可跨告警
+    # 上报人：只能查看和维护本人上报（创建者=经手人）的告警；新建不受限
     "reporter": {
+        "alert.view": "handler",
+        "alert.note": "handler",
+        "alert.entity": "handler",
+        "attachment.write": "handler",
+        "ocr.run": "handler",
         "alert.edit": "handler",
-        "alert.delete": "handler",
     },
-    # 业务关联人：只能改/删本人经手的告警；提交关联信息(记录/实体/附件)可跨告警
+    # 业务关联人：只能查看和维护本人经手的告警
     "liaison": {
         "alert.edit": "handler",
-        "alert.delete": "handler",
+        "alert.view": "handler",
+        "alert.note": "handler",
+        "alert.entity": "handler",
+        "attachment.write": "handler",
+        "ocr.run": "handler",
     },
     # admin：对象级豁免（可处理任意告警）
 }
@@ -139,7 +148,20 @@ ROLE_SCOPES = {
 _SCOPE_RANK = {"self": 0, "handler": 1, "assigned": 2}
 
 # ============ 策略常量 ============
-MIN_PASSWORD_LEN = 8
+
+RESOURCE_SCOPED_PERMISSIONS = {
+    "alert.view", "alert.edit", "alert.delete", "alert.conclude", "alert.status",
+    "alert.assign", "alert.reject", "alert.reopen", "alert.note", "alert.entity",
+    "subtask.manage", "subtask.execute", "attachment.write", "ocr.run",
+}
+ROLE_DEFAULT_SCOPES = {
+    "analyst": "handler",
+    "responder": "assigned",
+    "reporter": "handler",
+    "liaison": "handler",
+}
+ADMIN_ONLY_PERMISSIONS = {"alert.delete", "system.manage", "data.clear"}
+MIN_PASSWORD_LEN = 12
 # 不启用「登录失败自动锁定」策略；失败尝试仍会记入审计(login_failed)以便排查。
 SESSION_IDLE_MINUTES = 60
 SESSION_ABSOLUTE_HOURS = 12
@@ -168,11 +190,8 @@ def _parse_dt(value: Any) -> Optional[datetime]:
 
 def _role_perm_map() -> Dict[str, set]:
     """角色→权限集（DB 为准；表空时回退代码常量）。admin 恒拥有全部权限,防管理锁死。"""
-    try:
-        with _conn() as conn:
-            rows = conn.execute("SELECT role_code, permission_code FROM role_permissions").fetchall()
-    except Exception:
-        rows = []
+    with _conn() as conn:
+        rows = conn.execute("SELECT role_code, permission_code FROM role_permissions").fetchall()
     m: Dict[str, set] = {}
     for r in rows:
         m.setdefault(r["role_code"], set()).add(r["permission_code"])
@@ -205,7 +224,14 @@ def set_role_permissions(role_code: str, perms: List[str], actor: str) -> Dict[s
         raise ValueError("管理员角色的权限不可修改（始终拥有全部权限）")
     if role_code not in {code for code, _, _ in BUILTIN_ROLES}:
         raise ValueError("角色不存在")
-    clean = [p for p in (perms or []) if p in ALL_PERMISSIONS]
+    requested = list(dict.fromkeys(str(p).strip() for p in (perms or []) if str(p).strip()))
+    unknown = [p for p in requested if p not in ALL_PERMISSIONS]
+    if unknown:
+        raise ValueError("包含未知权限：" + "、".join(unknown))
+    forbidden = sorted(set(requested) & ADMIN_ONLY_PERMISSIONS)
+    if forbidden:
+        raise ValueError("以下高风险权限仅允许管理员角色持有：" + "、".join(forbidden))
+    clean = requested
     with _conn() as conn:
         conn.execute("DELETE FROM role_permissions WHERE role_code = ?", (role_code,))
         for p in clean:
@@ -222,20 +248,18 @@ def _user_role_codes(user: Dict[str, Any]) -> List[str]:
 
 
 def has_scope_bypass(user: Dict[str, Any]) -> bool:
-    # 服务令牌本身已按 scopes 白名单限权（仅低危入库权限），不受对象级归属限制
-    if (user or {}).get("is_service"):
-        return True
     return any(code in SCOPE_BYPASS_ROLES for code in _user_role_codes(user))
 
 
 def effective_scope(user: Dict[str, Any], permission: str) -> Optional[str]:
-    """返回该用户对某权限的对象级归属要求；None=不受对象级限制（可全局使用）。
+    """返回对象级归属要求；None 表示该权限不受对象归属限制。
 
-    规则：豁免角色 -> None；否则在「拥有该权限的各角色」中，只要有任一角色未对其
-    设置对象约束即视为全局放行；全部设了约束时取最宽松的一个。
+    管理员全局放行；服务令牌和普通角色的对象权限默认收敛到经手/受指派范围。
     """
     if has_scope_bypass(user):
         return None
+    if (user or {}).get("is_service"):
+        return "handler" if permission in RESOURCE_SCOPED_PERMISSIONS else None
     role_codes = _user_role_codes(user)
     perm_map = _role_perm_map()
     holding = [c for c in role_codes if permission in perm_map.get(c, set())]
@@ -244,6 +268,8 @@ def effective_scope(user: Dict[str, Any], permission: str) -> Optional[str]:
     scopes = []
     for code in holding:
         sc = ROLE_SCOPES.get(code, {}).get(permission)
+        if sc is None and permission in RESOURCE_SCOPED_PERMISSIONS:
+            sc = ROLE_DEFAULT_SCOPES.get(code, "handler")
         if sc is None:
             return None  # 有角色无限制地授予 -> 全局放行
         scopes.append(sc)
@@ -252,11 +278,11 @@ def effective_scope(user: Dict[str, Any], permission: str) -> Optional[str]:
 
 # ============ 告警队列读可见性（按角色，与写权限/对象级作用域相互独立） ============
 # all           = 看全部（管理员）
-# own+unassigned= 本人经手/上报 + 待分配(无处理人) 告警（上报人）
+# own+unassigned= 本人经手 + 待分配(无处理人) 告警（研判人员可主动认领）
 # own           = 仅本人经手/受指派的告警（研判人员/业务关联人/应急处置人）
 QUEUE_SEE_ALL_ROLES = {"admin"}
-# 研判人员、上报人：除本人经手外，还能看待分配(无处理人)告警（研判人员可自领研判、上报人可追踪）
-QUEUE_SEE_UNASSIGNED_ROLES = {"reporter", "analyst"}
+# 研判人员除本人经手外，还能看待分配告警，以便主动认领。
+QUEUE_SEE_UNASSIGNED_ROLES = {"analyst"}
 
 
 def queue_visibility(user: Dict[str, Any]) -> str:
@@ -329,6 +355,7 @@ def init_auth() -> None:
                 expires_at TEXT NOT NULL,
                 ip TEXT,
                 user_agent TEXT,
+                csrf_hash TEXT,
                 revoked INTEGER NOT NULL DEFAULT 0,
                 FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
             );
@@ -358,12 +385,20 @@ def init_auth() -> None:
                 PRIMARY KEY (role_code, permission_code)
             );
 
+            CREATE TABLE IF NOT EXISTS auth_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
             CREATE INDEX IF NOT EXISTS idx_user_roles_user ON user_roles(user_id);
             CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash);
             """
         )
         # 权限目录：始终与代码定义对齐（名称/分类可更新）
+        session_columns = {row["name"] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+        if "csrf_hash" not in session_columns:
+            conn.execute("ALTER TABLE sessions ADD COLUMN csrf_hash TEXT")
         for code, name, category in PERMISSION_CATALOG:
             conn.execute(
                 "INSERT INTO permissions (code, name, category) VALUES (?, ?, ?) "
@@ -379,6 +414,30 @@ def init_auth() -> None:
                         "INSERT OR IGNORE INTO role_permissions (role_code, permission_code) VALUES (?, ?)",
                         (role_code, perm),
                     )
+        policy_row = conn.execute(
+            "SELECT value FROM auth_meta WHERE key = 'permission_policy_version'"
+        ).fetchone()
+        policy_version = int(policy_row["value"]) if policy_row else 0
+        if policy_version < 2:
+            placeholders = ",".join("?" for _ in ADMIN_ONLY_PERMISSIONS)
+            conn.execute(
+                f"DELETE FROM role_permissions WHERE role_code != 'admin' "
+                f"AND permission_code IN ({placeholders})",
+                tuple(sorted(ADMIN_ONLY_PERMISSIONS)),
+            )
+            policy_version = 2
+        if policy_version < 3:
+            conn.execute(
+                "DELETE FROM role_permissions WHERE role_code = 'responder' AND permission_code = 'subtask.manage'"
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO role_permissions (role_code, permission_code) VALUES ('responder', 'subtask.execute')"
+            )
+            policy_version = 3
+        conn.execute(
+            "INSERT OR REPLACE INTO auth_meta (key, value) VALUES ('permission_policy_version', ?)",
+            (str(policy_version),),
+        )
         now = _now()
         for code, name, description in BUILTIN_ROLES:
             existing = conn.execute("SELECT id FROM roles WHERE code = ?", (code,)).fetchone()
@@ -432,6 +491,10 @@ def _get_user_row_by_username(username: str):
     with _conn() as conn:
         return conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
 
+def is_active_username(username: str) -> bool:
+    row = _get_user_row_by_username((username or "").strip())
+    return bool(row and row["status"] == "active")
+
 
 def _roles_of(user_id: str) -> List[Dict[str, str]]:
     with _conn() as conn:
@@ -483,7 +546,7 @@ def list_users() -> List[Dict[str, Any]]:
 
 
 def list_directory(role_code: Optional[str] = None) -> List[Dict[str, Any]]:
-    """指派选人用的精简用户目录：仅活跃账号、最小字段（用户名/姓名/角色）。"""
+    """指派选人用的精简用户目录：仅活跃账号、用户名与显示名。"""
     out = []
     for u in list_users():
         if u.get("status") != "active":
@@ -494,7 +557,6 @@ def list_directory(role_code: Optional[str] = None) -> List[Dict[str, Any]]:
         out.append({
             "username": u["username"],
             "display_name": u["display_name"],
-            "roles": codes,
         })
     return out
 
@@ -660,6 +722,7 @@ def change_password(user_id: str, old_password: str, new_password: str) -> Tuple
             (generate_password_hash(new_password), _now(), user_id),
         )
     _audit("change_password", "user", user_id, row["username"])
+    _revoke_user_sessions(user_id)
     return True, None
 
 
@@ -688,6 +751,7 @@ def verify_login(username: str, password: str, ip: str = "", user_agent: str = "
         _audit("login_failed", "auth", username, username, after={"reason": "no_such_user", "ip": ip})
         return None, "用户名或口令错误"
     if row["status"] == "disabled":
+        _audit("login_failed", "auth", row["id"], username, after={"reason": "disabled", "ip": ip})
         return None, "账号已停用,请联系管理员"
     if not check_password_hash(row["password_hash"], password):
         _register_failure(row, ip)
@@ -707,26 +771,24 @@ def create_session(user_id: str, ip: str = "", user_agent: str = "") -> Dict[str
     with _conn() as conn:
         conn.execute(
             """
-            INSERT INTO sessions (token, user_id, created_at, last_seen_at, expires_at, ip, user_agent, revoked)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+            INSERT INTO sessions (token, user_id, created_at, last_seen_at, expires_at, ip, user_agent, csrf_hash, revoked)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
             """,
-            (token, user_id, now.isoformat(), now.isoformat(), expires.isoformat(), ip, (user_agent or "")[:300]),
+            (_hash_token(token), user_id, now.isoformat(), now.isoformat(), expires.isoformat(), ip, (user_agent or "")[:300], _hash_token(csrf)),
         )
-    # CSRF 令牌与会话绑定,存入 user_agent 无关字段;这里通过单独返回给上层写 cookie
+    # CSRF 明文仅返回给上层写 cookie，库中保存摘要并与会话绑定。
     return {"token": token, "csrf": csrf, "expires_at": expires.isoformat()}
 
-
-# CSRF 采用「双提交 cookie」模式:令牌只放 cookie(前端可读)+ 请求头回传比对,
-# 不落库,不影响会话有效性判定,因此 create_session 直接返回随机 csrf。
 
 def resolve_session(token: str) -> Optional[Dict[str, Any]]:
     if not token:
         return None
+    token_digest = _hash_token(token)
     now = datetime.now(timezone.utc)
     # 只读事务读取会话，尽早释放共享锁；不要在同一事务里 SELECT 后再 UPDATE，
     # 否则并发请求会「各持共享锁、又都想升独占锁」相互阻塞。
     with _conn() as conn:
-        row = conn.execute("SELECT * FROM sessions WHERE token = ?", (token,)).fetchone()
+        row = conn.execute("SELECT * FROM sessions WHERE token = ?", (token_digest,)).fetchone()
     if not row or row["revoked"]:
         return None
     expires = _parse_dt(row["expires_at"])
@@ -737,7 +799,7 @@ def resolve_session(token: str) -> Optional[Dict[str, Any]]:
         # 过期/空闲超时：尽力吊销并拒绝（写失败也一律拒绝，安全侧默认拒绝）。
         try:
             with _conn() as conn:
-                conn.execute("UPDATE sessions SET revoked = 1 WHERE token = ?", (token,))
+                conn.execute("UPDATE sessions SET revoked = 1 WHERE token = ?", (token_digest,))
         except sqlite3.OperationalError:
             pass
         return None
@@ -750,7 +812,7 @@ def resolve_session(token: str) -> Optional[Dict[str, Any]]:
             with _conn() as conn:
                 conn.execute(
                     "UPDATE sessions SET last_seen_at = ? WHERE token = ?",
-                    (now.isoformat(), token),
+                    (now.isoformat(), token_digest),
                 )
         except sqlite3.OperationalError:
             pass
@@ -761,10 +823,21 @@ def revoke_session(token: str, actor: Optional[str] = None) -> None:
     if not token:
         return
     with _conn() as conn:
-        conn.execute("UPDATE sessions SET revoked = 1 WHERE token = ?", (token,))
+        conn.execute("UPDATE sessions SET revoked = 1 WHERE token = ?", (_hash_token(token),))
     if actor:
         _audit("logout", "auth", None, actor)
 
+
+def verify_session_csrf(token: str, csrf: str) -> bool:
+    if not token or not csrf:
+        return False
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT csrf_hash, revoked FROM sessions WHERE token = ?", (_hash_token(token),)
+        ).fetchone()
+    if not row or row["revoked"] or not row["csrf_hash"]:
+        return False
+    return secrets.compare_digest(row["csrf_hash"], _hash_token(csrf))
 
 def _revoke_user_sessions(user_id: str) -> None:
     with _conn() as conn:
@@ -808,10 +881,16 @@ def create_api_token(name: str, scopes: List[str], actor: str, expires_days: Opt
     raw = API_TOKEN_PREFIX + secrets.token_urlsafe(32)
     token_id = _id("tok_")
     now = _now()
-    expires_at = None
-    if expires_days:
-        expires_at = (datetime.now(timezone.utc) + timedelta(days=int(expires_days))).isoformat()
+    try:
+        valid_days = int(expires_days or 90)
+    except (TypeError, ValueError):
+        raise ValueError("令牌有效期必须是天数")
+    if not 1 <= valid_days <= 3650:
+        raise ValueError("令牌有效期必须在 1 到 3650 天之间")
+    expires_at = (datetime.now(timezone.utc) + timedelta(days=valid_days)).isoformat()
     with _conn() as conn:
+        if conn.execute("SELECT 1 FROM api_tokens WHERE name = ?", (name,)).fetchone():
+            raise ValueError("令牌名称已存在，名称不可复用")
         conn.execute(
             """
             INSERT INTO api_tokens
@@ -854,13 +933,16 @@ def resolve_api_token(raw: str) -> Optional[Dict[str, Any]]:
         expires = _parse_dt(row["expires_at"])
         if expires and now >= expires:
             return None
-        conn.execute("UPDATE api_tokens SET last_used_at = ? WHERE id = ?", (now.isoformat(), row["id"]))
+        last_used = _parse_dt(row["last_used_at"])
+        if not last_used or (now - last_used).total_seconds() >= _LAST_SEEN_THROTTLE_SECONDS:
+            conn.execute(
+                "UPDATE api_tokens SET last_used_at = ? WHERE id = ?", (now.isoformat(), row["id"]))
         scopes = _json_loads(row["scopes"], [])
         name = row["name"]
         token_id = row["id"]
     return {
         "id": f"apitoken:{token_id}",
-        "username": f"svc:{name}",
+        "username": f"svc:{token_id}",
         "display_name": f"服务令牌：{name}",
         "is_service": True,
         "status": "active",

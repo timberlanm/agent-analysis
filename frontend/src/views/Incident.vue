@@ -362,8 +362,8 @@ export default { name: 'Incident' }
             <div v-if="responderHint" class="responder-hint">
               <span>已转入应急响应处置。当前处理人：<strong>{{ (selectedAlert.handlers || []).join('、') || '无' }}</strong>。真实攻击 / 安全事件通常需多团队协同，可拆分处置子任务分派各团队。</span>
               <div class="responder-hint-actions">
-                <el-button v-if="hasPerm('subtask.manage')" size="small" type="warning" @click="openSubtaskTab">拆分处置子任务</el-button>
-                <el-button v-if="hasPerm('subtask.manage')" size="small" @click="openResponderAssign">指派处置人</el-button>
+                <el-button v-if="canCoordinateSubtasks" size="small" type="warning" @click="openSubtaskTab">拆分处置子任务</el-button>
+                <el-button v-if="canCoordinateSubtasks" size="small" @click="openResponderAssign">指派处置人</el-button>
                 <el-button size="small" text @click="responderHint = false">暂不</el-button>
               </div>
             </div>
@@ -432,7 +432,7 @@ export default { name: 'Incident' }
               <span class="research-fill-title">处置子任务</span>
               <span v-if="(selectedAlert.subtasks || []).length" class="tab-count">{{ (selectedAlert.subtasks || []).length }}</span>
               <span class="subtask-optional">可选</span>
-              <el-button v-if="!subtaskAdding && !isClosed && hasPerm('subtask.manage')" size="small" type="primary" plain @click="openSubtaskAdd">
+              <el-button v-if="!subtaskAdding && !isClosed && canCoordinateSubtasks" size="small" type="primary" plain @click="openSubtaskAdd">
                 <el-icon><Plus /></el-icon>添加处置子任务
               </el-button>
             </div>
@@ -451,10 +451,10 @@ export default { name: 'Incident' }
                   <span v-if="st.assignee" class="subtask-tag person">{{ st.assignee }}</span>
                 </div>
                 <div class="subtask-ops">
-                  <el-select v-model="st.status" size="small" class="subtask-status" @change="changeSubtaskStatus(st)">
+                  <el-select v-model="st.status" size="small" class="subtask-status" :disabled="!canExecuteSubtask(st)" @change="changeSubtaskStatus(st)">
                     <el-option v-for="s in subtaskStatusOptions" :key="s.value" :label="s.label" :value="s.value" />
                   </el-select>
-                  <button class="subtask-del" title="删除" @click="removeSubtask(st)"><el-icon><Delete /></el-icon></button>
+                  <button v-if="canCoordinateSubtasks" class="subtask-del" title="删除" @click="removeSubtask(st)"><el-icon><Delete /></el-icon></button>
                 </div>
               </div>
               <div v-if="!(selectedAlert.subtasks || []).length" class="empty-state">暂无处置子任务。需其他团队协同处置（如封禁 IP、隔离主机）时在此拆分分派；误报等无需处置可留空。</div>
@@ -503,7 +503,7 @@ export default { name: 'Incident' }
               </div>
             </el-tab-pane>
 
-            <el-tab-pane label="审计记录" name="audit">
+            <el-tab-pane v-if="hasPerm('audit.view')" label="审计记录" name="audit">
               <div class="timeline">
                 <div v-for="item in deleteAudits" :key="item.id" class="timeline-item">
                   <div class="timeline-time">{{ formatTime(item.created_at) }} · {{ item.actor || '-' }} · {{ auditActionLabel(item.action) }}</div>
@@ -1151,6 +1151,10 @@ function noteText(note) {
   return String(note?.content || '').replace(RESEARCH_IMG_RE, '').trim()
 }
 const isClosed = computed(() => selectedAlert.value?.status === 'closed')
+const canCoordinateSubtasks = computed(() => hasPerm('subtask.manage'))
+const canExecuteSubtask = (subtask) => canCoordinateSubtasks.value || (
+  hasPerm('subtask.execute') && subtask?.assignee === currentUser
+)
 // 待分配 / 新建中：尚未进入研判，研判输入只读
 const researchReadonly = computed(() => ['pending', 'new'].includes(selectedAlert.value?.status))
 
@@ -2061,7 +2065,7 @@ async function refreshSelectedAlert() {
 }
 
 async function submitSubtask() {
-  if (!selectedAlert.value) return
+  if (!selectedAlert.value || !canCoordinateSubtasks.value) return
   const title = subtaskForm.value.title.trim()
   if (!title) return
   try {
@@ -2081,6 +2085,7 @@ async function submitSubtask() {
 }
 
 async function changeSubtaskStatus(st) {
+  if (!canExecuteSubtask(st)) return
   try {
     const res = await updateIncidentSubtask(st.id, { status: st.status })
     if (!res.success) ElMessage.error(res.error || '更新失败')
@@ -2093,6 +2098,7 @@ async function changeSubtaskStatus(st) {
 }
 
 async function removeSubtask(st) {
+  if (!canCoordinateSubtasks.value) return
   try {
     await ElMessageBox.confirm(`删除处置子任务「${st.title}」？`, '确认删除', {
       confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning'
@@ -2107,7 +2113,6 @@ async function removeSubtask(st) {
     ElMessage.error('删除失败: ' + e.message)
   }
 }
-
 async function changeConclusion(conclusion) {
   if (!selectedAlert.value) return
   const prev = selectedAlert.value.conclusion || ''

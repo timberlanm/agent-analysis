@@ -13,6 +13,7 @@
 - current_user():读取本次请求解析出的登录用户
 """
 from functools import wraps
+import secrets
 
 from flask import Blueprint, g, jsonify, request
 
@@ -26,6 +27,8 @@ SESSION_COOKIE = "sid"
 CSRF_COOKIE = "csrf_token"
 CSRF_HEADER = "X-CSRF-Token"
 _COOKIE_MAX_AGE = auth_service.SESSION_ABSOLUTE_HOURS * 3600
+_PASSWORD_CHANGE_ENDPOINTS = {"auth.login", "auth.logout", "auth.me", "auth.change_password"}
+
 
 
 # ---------- 请求级用户解析(应用级 before_request) ----------
@@ -43,6 +46,11 @@ def load_current_user():
         raw = _bearer_token()
         if raw:
             g.current_user = auth_service.resolve_api_token(raw)
+    user = g.current_user
+    if (user and user.get("must_change_password")
+            and request.method != "OPTIONS"
+            and request.endpoint not in _PASSWORD_CHANGE_ENDPOINTS):
+        return jsonify({"success": False, "error": "首次登录或口令已重置，请先修改口令", "must_change_password": True}), 403
 
 
 def _bearer_token():
@@ -74,7 +82,12 @@ def require_perm(permission: str):
             if permission not in user.get("permissions", set()):
                 auth_service.audit_denied(
                     user.get("username"), permission,
-                    {"method": request.method, "path": request.path},
+                    {
+                        "method": request.method,
+                        "path": request.path,
+                        "ip": request.remote_addr or "",
+                        "user_agent": request.headers.get("User-Agent", "")[:300],
+                    },
                 )
                 return jsonify({"success": False, "error": "权限不足,无法执行该操作"}), 403
             return fn(*args, **kwargs)
@@ -86,7 +99,10 @@ def verify_csrf() -> bool:
     """双提交 cookie:请求头 X-CSRF-Token 必须与 csrf_token cookie 一致。"""
     header = request.headers.get(CSRF_HEADER, "")
     cookie = request.cookies.get(CSRF_COOKIE, "")
-    return bool(cookie) and header == cookie
+    if not cookie or not header or not secrets.compare_digest(header, cookie):
+        return False
+    session_token = request.cookies.get(SESSION_COOKIE, "")
+    return auth_service.verify_session_csrf(session_token, cookie)
 
 
 # ---------- cookie ----------
@@ -158,6 +174,10 @@ def directory():
         return jsonify({"success": False, "error": "未登录"}), 401
     perms = user.get("permissions", set())
     if not ({"alert.assign", "subtask.manage"} & set(perms)):
+        auth_service.audit_denied(
+            user.get("username"), "directory.view",
+            {"method": request.method, "path": request.path, "ip": request.remote_addr or ""},
+        )
         return jsonify({"success": False, "error": "权限不足"}), 403
     role = request.args.get("role") or None
     return jsonify({"success": True, "data": {"users": auth_service.list_directory(role)}})
@@ -174,7 +194,11 @@ def change_password():
     )
     if error:
         return jsonify({"success": False, "error": error}), 400
-    return jsonify({"success": True})
+    sess = auth_service.create_session(
+        user["id"], ip=request.remote_addr or "", user_agent=request.headers.get("User-Agent", ""))
+    resp = jsonify({"success": True})
+    _set_session_cookies(resp, sess["token"], sess["csrf"])
+    return resp
 
 
 # ---------- 用户管理(仅管理员) ----------

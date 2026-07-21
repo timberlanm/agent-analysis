@@ -76,7 +76,7 @@
       <!-- ============ 角色权限 ============ -->
       <el-tab-pane label="角色权限" name="perms">
         <div class="au-toolbar">
-          <span class="au-hint">勾选各角色可执行的操作；管理员始终拥有全部权限、不可修改。保存后相关用户重新登录即生效。</span>
+          <span class="au-hint">保存后立即生效；对象类权限仍受本人经手/受指派范围限制，高风险权限仅管理员持有。</span>
           <el-button size="small" type="primary" :loading="permSaving" @click="savePerms">保存</el-button>
           <el-button size="small" :loading="permLoading" @click="loadPerms">刷新</el-button>
         </div>
@@ -90,9 +90,13 @@
             </thead>
             <tbody>
               <tr v-for="p in catalog" :key="p.code">
-                <td class="au-perm-col"><span class="au-cat">{{ p.category }}</span>{{ p.name }}</td>
+                <td class="au-perm-col">
+                  <span class="au-cat">{{ p.category }}</span>{{ p.name }}
+                  <small v-if="adminOnlyPermissions.has(p.code)" class="au-risk">仅管理员</small>
+                </td>
                 <td v-for="r in roles" :key="r.code" class="au-check-cell">
-                  <el-checkbox v-if="editMatrix[r.code]" v-model="editMatrix[r.code][p.code]" :disabled="r.code === 'admin'" />
+                  <el-checkbox v-if="editMatrix[r.code]" v-model="editMatrix[r.code][p.code]"
+                               :disabled="r.code === 'admin' || adminOnlyPermissions.has(p.code)" />
                 </td>
               </tr>
             </tbody>
@@ -107,7 +111,7 @@
         <el-form-item label="用户名"><el-input v-model="createForm.username" placeholder="登录名" /></el-form-item>
         <el-form-item label="姓名"><el-input v-model="createForm.display_name" placeholder="显示名（可选）" /></el-form-item>
         <el-form-item label="初始口令">
-          <el-input v-model="createForm.password" placeholder="至少 8 位" show-password />
+          <el-input v-model="createForm.password" placeholder="至少 12 位" show-password />
         </el-form-item>
         <el-form-item label="角色">
           <el-checkbox-group v-model="createForm.roles">
@@ -149,8 +153,8 @@
           </el-checkbox-group>
         </el-form-item>
         <el-form-item label="有效期">
-          <el-input-number v-model="tokenForm.expires_days" :min="0" :max="3650" controls-position="right" />
-          <span class="au-hint">天，0 或留空表示永不过期</span>
+          <el-input-number v-model="tokenForm.expires_days" :min="1" :max="3650" controls-position="right" />
+          <span class="au-hint">天，默认 90 天，最长 3650 天</span>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -207,7 +211,7 @@ const tokens = ref([])
 const allowedScopes = ref([])
 const tokenLoading = ref(false)
 const tokenCreateVisible = ref(false)
-const tokenForm = reactive({ name: '', scopes: ['alert.create'], expires_days: 0 })
+const tokenForm = reactive({ name: '', scopes: ['alert.create'], expires_days: 90 })
 const tokenRevealVisible = ref(false)
 const newToken = ref('')
 
@@ -216,6 +220,7 @@ const catalog = ref([])
 const editMatrix = reactive({})
 const permLoading = ref(false)
 const permSaving = ref(false)
+const adminOnlyPermissions = new Set(['alert.delete', 'system.manage', 'data.clear'])
 
 function fmt(iso) {
   if (!iso) return ''
@@ -258,7 +263,7 @@ async function savePerms() {
       const perms = catalog.value.filter((p) => editMatrix[r.code] && editMatrix[r.code][p.code]).map((p) => p.code)
       await setRolePermissions(r.code, perms)
     }
-    ElMessage.success('角色权限已保存（相关用户重新登录后界面同步）')
+    ElMessage.success('角色权限已保存并立即生效')
     await loadPerms()
   } catch (e) {
     ElMessage.error(e.message || '保存失败')
@@ -291,7 +296,7 @@ function openCreate() {
 
 async function submitCreate() {
   if (!createForm.username.trim()) return ElMessage.warning('请输入用户名')
-  if (createForm.password.length < 8) return ElMessage.warning('初始口令至少 8 位')
+  if (createForm.password.length < 12) return ElMessage.warning('初始口令至少 12 位')
   if (!createForm.roles.length) return ElMessage.warning('请至少选择一个角色')
   submitting.value = true
   try {
@@ -340,11 +345,11 @@ async function toggleStatus(row) {
 
 async function resetPassword(row) {
   try {
-    const { value } = await ElMessageBox.prompt(`为 ${row.username} 设置新口令（至少 8 位）`, '重置口令', {
+    const { value } = await ElMessageBox.prompt(`为 ${row.username} 设置新口令（至少 12 位）`, '重置口令', {
       confirmButtonText: '确定',
       cancelButtonText: '取消',
       inputType: 'password',
-      inputValidator: (v) => (v && v.length >= 8) || '口令至少 8 位',
+      inputValidator: (v) => (v && v.length >= 12) || '口令至少 12 位',
     })
     await resetAuthUserPassword(row.id, value)
     ElMessage.success('口令已重置（该用户需用新口令登录并再次修改）')
@@ -381,7 +386,7 @@ async function loadTokens() {
 function openCreateToken() {
   tokenForm.name = ''
   tokenForm.scopes = ['alert.create']
-  tokenForm.expires_days = 0
+  tokenForm.expires_days = 90
   tokenCreateVisible.value = true
 }
 
@@ -393,7 +398,7 @@ async function submitCreateToken() {
     const payload = {
       name: tokenForm.name.trim(),
       scopes: tokenForm.scopes,
-      expires_days: tokenForm.expires_days || null,
+      expires_days: tokenForm.expires_days,
     }
     const res = await createApiToken(payload)
     newToken.value = res.data.token
@@ -493,6 +498,12 @@ async function revokeToken(row) {
   background: var(--primary-light, #D9E8FA);
   color: var(--primary, #006DE0);
   font-size: 11px;
+}
+.au-risk {
+  margin-left: 6px;
+  color: var(--el-color-danger);
+  font-size: 11px;
+  font-weight: 400;
 }
 .au-check-cell { width: 90px; }
 </style>

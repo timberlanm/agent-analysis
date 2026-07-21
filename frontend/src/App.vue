@@ -68,7 +68,7 @@
           <el-input v-model="pwForm.old" type="password" show-password autocomplete="current-password" />
         </el-form-item>
         <el-form-item label="新口令">
-          <el-input v-model="pwForm.neo" type="password" show-password autocomplete="new-password" placeholder="至少 8 位" />
+          <el-input v-model="pwForm.neo" type="password" show-password autocomplete="new-password" placeholder="至少 12 位" />
         </el-form-item>
         <el-form-item label="确认新口令">
           <el-input v-model="pwForm.confirm" type="password" show-password autocomplete="new-password" />
@@ -136,7 +136,7 @@ async function doLogout() {
 }
 
 async function submitChangePassword() {
-  if (pwForm.neo.length < 8) return ElMessage.warning('新口令至少 8 位')
+  if (pwForm.neo.length < 12) return ElMessage.warning('新口令至少 12 位')
   if (pwForm.neo !== pwForm.confirm) return ElMessage.warning('两次输入的新口令不一致')
   pwLoading.value = true
   try {

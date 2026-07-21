@@ -884,22 +884,25 @@ def _insert_external_attachment(
     )
 
 
-def _visibility_where(restrict_actor: Optional[str], include_unassigned: bool = False):
-    """构造「授权可见性」SQL 条件 (fragment, params)；restrict_actor 为空则不限制。
-    可见 = 本人经手/受指派(owner/created_by/handlers/子任务负责人)；
-    include_unassigned 时额外放行「待分配」= 无处理人 **且未完成/未升级** 的告警。"""
+def _visibility_where(restrict_actor: Optional[str], include_unassigned: bool = False, alias: str = ""):
+    """构造授权可见性 SQL；alias 用于关联查询中的 alerts 表别名。"""
     if not restrict_actor:
         return "", []
+    prefix = f"{alias}." if alias else ""
+    escaped_actor = (str(restrict_actor).replace("\\", "\\\\")
+                     .replace("%", "\\%").replace("_", "\\_"))
+    handler_pattern = f'%"{escaped_actor}"%'
     cond = (
-        "owner = ? OR created_by = ? OR handlers LIKE ? "
-        "OR id IN (SELECT alert_id FROM subtasks WHERE assignee = ?)"
+        f"{prefix}owner = ? OR {prefix}created_by = ? "
+        f"OR {prefix}handlers LIKE ? ESCAPE '\\' "
+        f"OR {prefix}id IN (SELECT alert_id FROM subtasks WHERE assignee = ?)"
     )
     if include_unassigned:
         cond += (
-            " OR ((handlers IS NULL OR handlers = '' OR handlers = '[]') "
-            "AND status NOT IN ('closed','escalated'))"
+            f" OR (({prefix}handlers IS NULL OR {prefix}handlers = '' OR {prefix}handlers = '[]') "
+            f"AND {prefix}status NOT IN ('closed','escalated'))"
         )
-    return "(" + cond + ")", [restrict_actor, restrict_actor, f'%"{restrict_actor}"%', restrict_actor]
+    return "(" + cond + ")", [restrict_actor, restrict_actor, handler_pattern, restrict_actor]
 
 
 def list_alerts(filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
@@ -1005,13 +1008,6 @@ def get_alert(alert_id: str) -> Optional[Dict[str, Any]]:
                 (alert_id,),
             )
         ]
-        alert["audit"] = [
-            _row_to_audit(r)
-            for r in conn.execute(
-                "SELECT * FROM audit_logs WHERE target_id = ? ORDER BY created_at DESC LIMIT 100",
-                (alert_id,),
-            )
-        ]
         alert["subtasks"] = [
             _row_to_subtask(r)
             for r in conn.execute(
@@ -1019,13 +1015,6 @@ def get_alert(alert_id: str) -> Optional[Dict[str, Any]]:
                 (alert_id,),
             )
         ]
-        correlation = get_alert_correlation(alert_id, limit=8) or {
-            "summary": {},
-            "entity_profiles": [],
-            "related_alerts": [],
-        }
-        alert["correlation"] = correlation
-        alert["related"] = correlation["related_alerts"]
         return alert
 
 
@@ -1068,7 +1057,8 @@ def _diff_edit_fields(before: Dict[str, Any], after: Dict[str, Any]) -> List[str
     return changes
 
 
-def update_alert(alert_id: str, data: Dict[str, Any], actor: str = DEFAULT_ACTOR) -> Optional[Dict[str, Any]]:
+def update_alert(alert_id: str, data: Dict[str, Any], actor: str = DEFAULT_ACTOR,
+                 allow_workflow_fields: bool = False) -> Optional[Dict[str, Any]]:
     init_db()
     allowed = {
         "title",
@@ -1077,10 +1067,6 @@ def update_alert(alert_id: str, data: Dict[str, Any], actor: str = DEFAULT_ACTOR
         "source_product",
         "alert_type",
         "severity",
-        "status",
-        "conclusion",
-        "close_reason",
-        "created_by",
         "occurred_at",
         "discovered_at",
         "description",
@@ -1088,6 +1074,8 @@ def update_alert(alert_id: str, data: Dict[str, Any], actor: str = DEFAULT_ACTOR
         "evidence_info",
         "handling_suggestion",
     }
+    if allow_workflow_fields:
+        allowed.update({"status", "conclusion", "close_reason"})
     before = get_alert(alert_id)
     if not before:
         return None
@@ -1203,7 +1191,7 @@ def batch_update_alerts(
                 owner = str(payload.get("owner") or "").strip()
                 if not owner:
                     raise ValueError("批量分派需要指定处理人")
-                result = update_alert(alert_id, {"owner": owner, "status": "assigned"}, actor)
+                result = set_handlers(alert_id, [owner], actor)
             elif action == "status":
                 status = str(payload.get("status") or "").strip()
                 if status == "closed":
@@ -1411,15 +1399,23 @@ def save_attachment(
     return item, None
 
 
-def save_image(file_storage):
+def save_image(file_storage, actor: str = DEFAULT_ACTOR):
     """兼容旧接口：保存未绑定告警的图片。"""
-    return save_attachment(file_storage, alert_id=None)
+    return save_attachment(file_storage, alert_id=None, actor=actor)
 
 
 def get_attachment(attachment_id: str) -> Optional[Dict[str, Any]]:
     init_db()
     with _conn() as conn:
         row = conn.execute("SELECT * FROM attachments WHERE id = ?", (attachment_id,)).fetchone()
+    return _row_to_attachment(row) if row else None
+
+def get_attachment_by_path(filepath: str) -> Optional[Dict[str, Any]]:
+    init_db()
+    normalized = str(filepath or "").replace("\\", "/").lstrip("/")
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM attachments WHERE rel_path = ?", (normalized,)).fetchone()
     return _row_to_attachment(row) if row else None
 
 
@@ -1455,8 +1451,8 @@ def delete_attachment(attachment_id: str, actor: str = DEFAULT_ACTOR) -> bool:
     return True
 
 
-def delete_image(image_id: str):
-    return delete_attachment(image_id)
+def delete_image(image_id: str, actor: str = DEFAULT_ACTOR):
+    return delete_attachment(image_id, actor=actor)
 
 
 def add_entity(alert_id: str, entity: Dict[str, Any], actor: str = DEFAULT_ACTOR) -> Optional[Dict[str, Any]]:
@@ -1579,7 +1575,7 @@ def set_status(alert_id: str, status: str, actor: str = DEFAULT_ACTOR, reason: s
         if prev_conclusion and prev_conclusion not in INCIDENT_CONCLUSIONS:
             update_data["conclusion"] = ""
             reconciled_from = CONCLUSION_VALUES.get(prev_conclusion, prev_conclusion)
-    updated = update_alert(alert_id, update_data, actor)
+    updated = update_alert(alert_id, update_data, actor, allow_workflow_fields=True)
     add_note(alert_id, f"状态变更：{before.get('status_label')} -> {STATUS_VALUES[status]}{('，原因：' + note_reason) if note_reason else ''}", "status_change", actor, audit=False)
     if reconciled_from:
         add_note(
@@ -1603,7 +1599,7 @@ def set_conclusion(
     before = get_alert(alert_id)
     if not before:
         return None
-    updated = update_alert(alert_id, {"conclusion": conclusion}, actor)
+    updated = update_alert(alert_id, {"conclusion": conclusion}, actor, allow_workflow_fields=True)
     if updated and conclusion:
         label = CONCLUSION_VALUES.get(conclusion, conclusion)
         add_note(alert_id, f"研判结论：{label}{('。' + content) if content else ''}", "conclusion", actor, audit=False)
@@ -1885,7 +1881,9 @@ def delete_subtask(subtask_id: str, actor: str = DEFAULT_ACTOR) -> bool:
     return True
 
 
-def get_alert_correlation(alert_id: str, limit: int = 20) -> Optional[Dict[str, Any]]:
+def get_alert_correlation(alert_id: str, limit: int = 20,
+                          restrict_to_actor: Optional[str] = None,
+                          include_unassigned: bool = False) -> Optional[Dict[str, Any]]:
     init_db()
     with _conn() as conn:
         base_row = conn.execute("SELECT * FROM alerts WHERE id = ?", (alert_id,)).fetchone()
@@ -1896,9 +1894,15 @@ def get_alert_correlation(alert_id: str, limit: int = 20) -> Optional[Dict[str, 
             _row_to_entity(row)
             for row in conn.execute("SELECT * FROM entities WHERE alert_id = ?", (alert_id,))
         ]
+        vis_sql, vis_params = _visibility_where(restrict_to_actor, include_unassigned)
+        candidate_where = "id != ?"
+        candidate_params: List[Any] = [alert_id]
+        if vis_sql:
+            candidate_where += f" AND {vis_sql}"
+            candidate_params.extend(vis_params)
         candidate_rows = conn.execute(
-            "SELECT * FROM alerts WHERE id != ? ORDER BY updated_at DESC LIMIT 1000",
-            (alert_id,),
+            f"SELECT * FROM alerts WHERE {candidate_where} ORDER BY updated_at DESC LIMIT 1000",
+            candidate_params,
         ).fetchall()
         candidate_ids = [row["id"] for row in candidate_rows]
 
@@ -1912,17 +1916,19 @@ def get_alert_correlation(alert_id: str, limit: int = 20) -> Optional[Dict[str, 
                 entity_map.setdefault(row["alert_id"], []).append(_row_to_entity(row))
 
         entity_profiles = []
+        profile_vis, profile_params = _visibility_where(restrict_to_actor, include_unassigned, alias="a")
+        profile_filter = f" AND {profile_vis}" if profile_vis else ""
         for entity in base_entities:
             rows = conn.execute(
-                """
+                f"""
                 SELECT DISTINCT a.id, a.title, a.status, a.severity, a.updated_at
                 FROM alerts a
                 JOIN entities e ON e.alert_id = a.id
-                WHERE e.entity_type = ? AND e.value = ?
+                WHERE e.entity_type = ? AND e.value = ?{profile_filter}
                 ORDER BY a.updated_at DESC
                 LIMIT 6
                 """,
-                (entity["entity_type"], entity["value"]),
+                (entity["entity_type"], entity["value"], *profile_params),
             ).fetchall()
             status_counter = Counter(row["status"] for row in rows)
             entity_profiles.append(
@@ -2038,8 +2044,12 @@ def get_alert_correlation(alert_id: str, limit: int = 20) -> Optional[Dict[str, 
     }
 
 
-def get_related_alerts(alert_id: str, limit: int = 20) -> List[Dict[str, Any]]:
-    correlation = get_alert_correlation(alert_id, limit=limit)
+def get_related_alerts(alert_id: str, limit: int = 20,
+                       restrict_to_actor: Optional[str] = None,
+                       include_unassigned: bool = False) -> List[Dict[str, Any]]:
+    correlation = get_alert_correlation(
+        alert_id, limit=limit, restrict_to_actor=restrict_to_actor,
+        include_unassigned=include_unassigned)
     if not correlation:
         return []
     return correlation["related_alerts"]
@@ -2089,20 +2099,29 @@ def get_stats(restrict_to_actor: Optional[str] = None, include_unassigned: bool 
     }
 
 
-def get_operations_summary(days: int = 7) -> Dict[str, Any]:
+def get_operations_summary(days: int = 7, restrict_to_actor: Optional[str] = None,
+                           include_unassigned: bool = False) -> Dict[str, Any]:
     init_db()
     days = max(1, min(int(days or 7), 365))
     start_time = datetime.now(timezone.utc) - timedelta(days=days)
+    vis_sql, vis_params = _visibility_where(restrict_to_actor, include_unassigned)
+    alert_where = f" WHERE {vis_sql}" if vis_sql else ""
+    entity_where = (
+        f"WHERE alert_id IN (SELECT id FROM alerts WHERE {vis_sql})" if vis_sql else ""
+    )
     with _conn() as conn:
-        rows = [_row_to_alert(row) for row in conn.execute("SELECT * FROM alerts ORDER BY created_at DESC")]
+        rows = [_row_to_alert(row) for row in conn.execute(
+            f"SELECT * FROM alerts{alert_where} ORDER BY created_at DESC", vis_params)]
         entity_rows = [dict(row) for row in conn.execute(
-            """
+            f"""
             SELECT entity_type, value, count(DISTINCT alert_id) AS c
             FROM entities
+            {entity_where}
             GROUP BY entity_type, value
             ORDER BY c DESC
             LIMIT 10
-            """
+            """,
+            vis_params,
         )]
 
     period_alerts = []
@@ -2177,8 +2196,9 @@ def _csv_cell(value: Any) -> str:
     return '"' + text.replace('"', '""') + '"'
 
 
-def export_operations_csv(days: int = 7) -> str:
-    report = get_operations_summary(days)
+def export_operations_csv(days: int = 7, restrict_to_actor: Optional[str] = None,
+                          include_unassigned: bool = False) -> str:
+    report = get_operations_summary(days, restrict_to_actor, include_unassigned)
     lines = [
         "section,name,value,value2,value3",
         f"summary,period_days,{report['period_days']}",
@@ -2245,13 +2265,18 @@ def export_alert(alert_id: str, fmt: str = "json") -> Optional[Any]:
     return alert
 
 
-def export_all() -> Dict[str, Any]:
-    alerts = list_alerts({"limit": 10000})
+def export_all(restrict_to_actor: Optional[str] = None,
+               include_unassigned: bool = False) -> Dict[str, Any]:
+    filters: Dict[str, Any] = {"limit": 10000}
+    if restrict_to_actor:
+        filters["restrict_to_actor"] = restrict_to_actor
+        filters["include_unassigned"] = include_unassigned
+    alerts = list_alerts(filters)
     return {
         "export_time": _now(),
         "alerts": alerts,
         "alert_count": len(alerts),
-        "stats": get_stats(),
+        "stats": get_stats(restrict_to_actor, include_unassigned),
     }
 
 
@@ -2347,20 +2372,27 @@ def export_audit_csv(filters: Optional[Dict[str, Any]] = None, limit: int = 1000
     return buf.getvalue()
 
 
-def clear_all() -> bool:
+def clear_all(actor: str = DEFAULT_ACTOR) -> bool:
     """兼容旧接口：仅清空告警相关数据库记录，不删除文件。"""
     with _conn() as conn:
         conn.execute("DELETE FROM alerts")
         conn.execute("DELETE FROM attachments WHERE alert_id IS NULL")
-    _audit("clear_all", "analysis", "all")
+    _audit("clear_all", "analysis", "all", actor)
     return True
 
 
-def save_alert_from_json(raw: Dict[str, Any]):
-    return create_alert(raw)
+def _sanitize_ingest_payload(raw: Dict[str, Any]) -> Dict[str, Any]:
+    data = dict(raw) if isinstance(raw, dict) else {}
+    protected = {"status", "conclusion", "close_reason", "owner", "handlers", "created_by", "updated_by", "reporter", "attachments"}
+    for field in protected:
+        data.pop(field, None)
+    return data
+
+def save_alert_from_json(raw: Dict[str, Any], actor: str = DEFAULT_ACTOR):
+    return create_alert(_sanitize_ingest_payload(raw), actor=actor)
 
 
-def save_alert_from_file(file_storage):
+def save_alert_from_file(file_storage, actor: str = DEFAULT_ACTOR):
     filename = file_storage.filename or "alert.json"
     if Path(filename).suffix.lower() != ".json":
         return None, "仅支持 .json 文件"
@@ -2372,7 +2404,7 @@ def save_alert_from_file(file_storage):
     except json.JSONDecodeError as e:
         return None, f"JSON 解析失败: {str(e)}"
 
-    alert = create_alert(raw)
+    alert = create_alert(_sanitize_ingest_payload(raw), actor=actor)
     saved_name = _safe_filename(filename)
     dest = Path(_ensure_dirs("attachments")) / saved_name
     dest.write_bytes(data)
@@ -2394,7 +2426,7 @@ def save_alert_from_file(file_storage):
                 len(data),
                 "application/json",
                 "原始告警 JSON",
-                DEFAULT_ACTOR,
+                actor,
                 _now(),
             ),
         )

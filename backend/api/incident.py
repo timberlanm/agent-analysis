@@ -45,6 +45,11 @@ def _json_body() -> dict:
 # 非豁免角色（研判员/处置人）只能操作本人经手/受指派的告警；主管、管理员不受限。
 
 def _scope_forbidden(msg: str = "无权操作该告警：仅限本人经手或受指派的告警"):
+    user = current_user() or {}
+    auth_service.audit_denied(
+        user.get("username"), "object.scope",
+        {"method": request.method, "path": request.path, "ip": request.remote_addr or ""},
+    )
     return jsonify({"success": False, "error": msg}), 403
 
 
@@ -83,11 +88,14 @@ def _scope_ok(alert: dict, permission: str) -> bool:
 def _handler_change_allowed(alert: dict, new_names):
     """指派类操作的对象级判定：非豁免角色仅可增删本人，且不得对已完成告警操作（防变相重开）。"""
     user = current_user()
+    new = {str(n).strip() for n in (new_names or []) if str(n).strip()}
+    inactive = sorted(n for n in new if not auth_service.is_active_username(n))
+    if inactive:
+        return False, "处理人账号不存在或已停用：" + "、".join(inactive)
     if auth_service.has_scope_bypass(user):
         return True, None
     username = user["username"]
     old = set(alert.get("handlers") or [])
-    new = {str(n).strip() for n in (new_names or []) if str(n).strip()}
     if old.symmetric_difference(new) - {username}:
         return False, "仅可自领或退出本人处理，改派他人请联系研判主管"
     if alert.get("status") == "closed":
@@ -99,6 +107,11 @@ def _queue_vis() -> str:
     """当前用户的告警队列可见性：all / own+unassigned / own。"""
     return auth_service.queue_visibility(current_user())
 
+def _visibility_args():
+    vis = _queue_vis()
+    return (None if vis == "all" else current_user()["username"],
+            vis == "own+unassigned")
+
 
 def _is_unassigned(alert: dict) -> bool:
     return not (alert.get("handlers") or [])
@@ -109,15 +122,22 @@ def _read_restricted() -> bool:
     return _queue_vis() != "all"
 
 
-def _read_ok(alert: dict) -> bool:
-    """读可见性判定：看全部放行；否则须为经手/受指派者；上报人另可见待分配告警。"""
+def _read_ok(alert: dict, audit_denial: bool = True) -> bool:
+    """读可见性判定：管理员全局可见；研判人员另可见待分配告警；其他角色仅限归属对象。"""
     vis = _queue_vis()
+    if "alert.view" not in current_user().get("permissions", set()):
+        return False
     if vis == "all":
         return True
     if _is_assigned(alert, current_user()["username"]):
         return True
     if vis == "own+unassigned" and _is_unassigned(alert):
         return True
+    if audit_denial:
+        auth_service.audit_denied(
+            current_user().get("username"), "alert.view.scope",
+            {"method": request.method, "path": request.path, "ip": request.remote_addr or ""},
+        )
     return False
 
 
@@ -126,6 +146,7 @@ def _read_forbidden():
 
 
 @incident_bp.route("/alerts", methods=["GET"])
+@require_perm("alert.view")
 def list_alerts():
     filters = {
         "keyword": request.args.get("keyword", ""),
@@ -141,7 +162,7 @@ def list_alerts():
         "limit": request.args.get("limit", 200),
         "offset": request.args.get("offset", 0),
     }
-    # 队列读可见性：非「看全部」的角色只可见本人经手/受指派的告警；上报人另可见待分配
+    # 队列读可见性：研判人员可认领待分配告警；其他非管理员角色仅可见本人经手/受指派告警。
     vis = _queue_vis()
     if vis != "all":
         filters["restrict_to_actor"] = current_user()["username"]
@@ -151,19 +172,63 @@ def list_alerts():
 
 
 @incident_bp.route("/alerts/batch", methods=["POST"])
-@require_perm("alert.edit")
+@require_perm("alert.view")
 def batch_alerts():
     data = _json_body()
-    try:
-        result = incident_service.batch_update_alerts(
-            data.get("ids", []),
-            data.get("action", ""),
-            data.get("payload", {}),
-            actor=_actor(),
+    action = str(data.get("action") or "").strip()
+    permission_map = {
+        "assign": "alert.assign",
+        "status": "alert.status",
+        "severity": "alert.edit",
+        "note": "alert.note",
+    }
+    permission = permission_map.get(action)
+    if not permission:
+        return jsonify({"success": False, "error": "不支持的批量操作"}), 400
+    user = current_user()
+    if permission not in user.get("permissions", set()):
+        auth_service.audit_denied(
+            user.get("username"), permission,
+            {"method": request.method, "path": request.path, "ip": request.remote_addr or ""},
         )
-        return jsonify({"success": True, "data": result})
+        return jsonify({"success": False, "error": "权限不足，无法执行该批量操作"}), 403
+    raw_ids = data.get("ids", [])
+    if not isinstance(raw_ids, list):
+        return jsonify({"success": False, "error": "告警 ID 列表格式无效"}), 400
+    alert_ids = list(dict.fromkeys(str(item).strip() for item in raw_ids if str(item).strip()))[:200]
+    if not alert_ids:
+        return jsonify({"success": False, "error": "请选择需要批量操作的告警"}), 400
+    payload = data.get("payload", {}) if isinstance(data.get("payload", {}), dict) else {}
+    allowed = []
+    denied = []
+    for alert_id in alert_ids:
+        existing = incident_service.get_alert(alert_id)
+        if not existing:
+            denied.append({"id": alert_id, "error": "告警不存在"})
+            continue
+        if action == "assign":
+            owner = str(payload.get("owner") or "").strip()
+            ok, err = _handler_change_allowed(existing, [owner] if owner else [])
+        else:
+            ok = _scope_ok(existing, permission)
+            err = None if ok else "无权操作该告警"
+        if not ok:
+            auth_service.audit_denied(
+                user.get("username"), permission,
+                {"method": request.method, "path": request.path, "target_id": alert_id},
+            )
+            denied.append({"id": alert_id, "error": err})
+            continue
+        allowed.append(alert_id)
+    if not allowed:
+        return jsonify({"success": True, "data": {"requested": len(alert_ids), "updated": 0, "errors": denied}})
+    try:
+        result = incident_service.batch_update_alerts(allowed, action, payload, actor=_actor())
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 400
+    result["requested"] = len(alert_ids)
+    result["errors"] = denied + list(result.get("errors") or [])
+    return jsonify({"success": True, "data": result})
 
 
 @incident_bp.route("/templates", methods=["GET"])
@@ -180,6 +245,9 @@ def get_alert_templates():
 @require_perm("alert.create")
 def create_alert():
     data = _json_body()
+    protected = {"status", "conclusion", "close_reason", "owner", "handlers", "created_by", "updated_by", "reporter", "attachments"}
+    for field in protected:
+        data.pop(field, None)
     try:
         alert = incident_service.create_alert(data, actor=_actor())
         return jsonify({"success": True, "data": alert})
@@ -188,14 +256,21 @@ def create_alert():
 
 
 @incident_bp.route("/alerts/<alert_id>", methods=["GET"])
+@require_perm("alert.view")
 def get_alert(alert_id):
     alert = incident_service.get_alert(alert_id)
     if not alert:
         return jsonify({"success": False, "error": "告警不存在"}), 404
     if not _read_ok(alert):
         return _read_forbidden()
+    restrict, include_unassigned = _visibility_args()
+    correlation = incident_service.get_alert_correlation(
+        alert_id, limit=8, restrict_to_actor=restrict, include_unassigned=include_unassigned)
+    alert["correlation"] = correlation or {"summary": {}, "entity_profiles": [], "related_alerts": []}
+    alert["related"] = alert["correlation"]["related_alerts"]
+    if "audit.view" in current_user().get("permissions", set()):
+        alert["audit"] = incident_service.list_audit(100, {"target_id": alert_id})
     return jsonify({"success": True, "data": alert})
-
 
 @incident_bp.route("/alerts/<alert_id>", methods=["PUT"])
 @require_perm("alert.edit")
@@ -229,6 +304,7 @@ def delete_alert(alert_id):
 
 
 @incident_bp.route("/alerts/<alert_id>/attachments", methods=["GET"])
+@require_perm("alert.view")
 def list_alert_attachments(alert_id):
     alert = incident_service.get_alert(alert_id)
     if not alert:
@@ -269,8 +345,10 @@ def delete_attachment(attachment_id):
     parent_id = item.get("alert_id")
     if parent_id:
         parent = incident_service.get_alert(parent_id)
-        if parent and not _scope_ok(parent, "attachment.write"):
+        if not parent or not _scope_ok(parent, "attachment.write"):
             return _scope_forbidden()
+    elif not (auth_service.has_scope_bypass(current_user()) or item.get("uploaded_by") == _actor()):
+        return _scope_forbidden("无权删除其他人上传的未关联附件")
     ok = incident_service.delete_attachment(attachment_id, actor=_actor())
     if not ok:
         return jsonify({"success": False, "error": "附件不存在"}), 404
@@ -301,6 +379,10 @@ def ocr_alert(alert_id):
     alert = incident_service.get_alert(alert_id)
     if not alert:
         return jsonify({"success": False, "error": "告警不存在"}), 404
+    if not _read_ok(alert):
+        return _read_forbidden()
+    if not _scope_ok(alert, "ocr.run"):
+        return _scope_forbidden()
     try:
         result = ocr_service.extract_from_alert(alert_id)
     except Exception as e:
@@ -309,6 +391,7 @@ def ocr_alert(alert_id):
 
 
 @incident_bp.route("/alerts/<alert_id>/entities", methods=["GET"])
+@require_perm("alert.view")
 def list_alert_entities(alert_id):
     alert = incident_service.get_alert(alert_id)
     if not alert:
@@ -341,7 +424,7 @@ def delete_entity(entity_id):
     parent_id = incident_service.get_entity_alert_id(entity_id)
     if parent_id:
         parent = incident_service.get_alert(parent_id)
-        if parent and not _scope_ok(parent, "alert.entity"):
+        if not parent or not _scope_ok(parent, "alert.entity"):
             return _scope_forbidden()
     ok = incident_service.delete_entity(entity_id, actor=_actor())
     if not ok:
@@ -350,6 +433,7 @@ def delete_entity(entity_id):
 
 
 @incident_bp.route("/alerts/<alert_id>/notes", methods=["GET"])
+@require_perm("alert.view")
 def list_alert_notes(alert_id):
     alert = incident_service.get_alert(alert_id)
     if not alert:
@@ -373,7 +457,7 @@ def add_alert_note(alert_id):
             alert_id,
             data.get("content", ""),
             data.get("note_type", "manual"),
-            data.get("author") or _actor(),
+            _actor(),
         )
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 400
@@ -391,6 +475,12 @@ def set_alert_status(alert_id):
     if not _scope_ok(existing, "alert.status"):
         return _scope_forbidden()
     data = _json_body()
+    if data.get("status") == "closed":
+        permissions = current_user().get("permissions", set())
+        if str(data.get("conclusion") or "").strip() and "alert.conclude" not in permissions:
+            return _scope_forbidden("关闭时写入研判结论需要“研判定性”权限")
+        if (str(data.get("key_evidence") or "").strip() or str(data.get("handling_suggestion") or "").strip()) and "alert.edit" not in permissions:
+            return _scope_forbidden("关闭时写入研判信息需要“编辑告警”权限")
     try:
         close_payload = {
             "close_reason": data.get("close_reason") or data.get("reason", ""),
@@ -416,6 +506,10 @@ def set_alert_conclusion(alert_id):
     if not _scope_ok(existing, "alert.conclude"):
         return _scope_forbidden()
     data = _json_body()
+    if (data.get("conclusion") in incident_service.AUTO_RESPONDING_CONCLUSIONS
+            and existing.get("status") not in ("closed", "responding")
+            and "alert.status" not in current_user().get("permissions", set())):
+        return _scope_forbidden("该结论会触发状态流转，需要“状态流转”权限")
     try:
         alert = incident_service.set_conclusion(
             alert_id,
@@ -487,6 +581,11 @@ def set_alert_handlers(alert_id):
 @require_perm("alert.reject")
 def reject_alert(alert_id):
     data = _json_body()
+    existing = incident_service.get_alert(alert_id)
+    if not existing:
+        return jsonify({"success": False, "error": "告警不存在"}), 404
+    if not _scope_ok(existing, "alert.reject"):
+        return _scope_forbidden()
     try:
         alert = incident_service.reject_alert(alert_id, data.get("reason", ""), actor=_actor())
     except Exception as e:
@@ -500,6 +599,11 @@ def reject_alert(alert_id):
 @require_perm("alert.reopen")
 def reopen_alert(alert_id):
     data = _json_body()
+    existing = incident_service.get_alert(alert_id)
+    if not existing:
+        return jsonify({"success": False, "error": "告警不存在"}), 404
+    if not _scope_ok(existing, "alert.reopen"):
+        return _scope_forbidden()
     try:
         alert = incident_service.reopen_alert(
             alert_id,
@@ -515,6 +619,7 @@ def reopen_alert(alert_id):
 
 
 @incident_bp.route("/alerts/<alert_id>/subtasks", methods=["GET"])
+@require_perm("alert.view")
 def list_alert_subtasks(alert_id):
     alert = incident_service.get_alert(alert_id)
     if not alert:
@@ -533,8 +638,12 @@ def add_alert_subtask(alert_id):
         return jsonify({"success": False, "error": "告警不存在"}), 404
     if not _scope_ok(existing, "subtask.manage"):
         return _scope_forbidden()
+    data = _json_body()
+    assignee = str(data.get("assignee") or "").strip()
+    if assignee and not auth_service.is_active_username(assignee):
+        return jsonify({"success": False, "error": "子任务负责人账号不存在或已停用"}), 400
     try:
-        item = incident_service.create_subtask(alert_id, _json_body(), actor=_actor())
+        item = incident_service.create_subtask(alert_id, data, actor=_actor())
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 400
     if not item:
@@ -543,22 +652,37 @@ def add_alert_subtask(alert_id):
 
 
 @incident_bp.route("/subtasks/<subtask_id>", methods=["PUT"])
-@require_perm("subtask.manage")
 def update_subtask(subtask_id):
     subtask = incident_service.get_subtask(subtask_id)
     if not subtask:
         return jsonify({"success": False, "error": "子任务不存在"}), 404
     parent = incident_service.get_alert(subtask.get("alert_id"))
-    if parent and not _scope_ok(parent, "subtask.manage"):
-        return _scope_forbidden()
+    data = _json_body()
+    permissions = current_user().get("permissions", set())
+    if "subtask.manage" in permissions:
+        if not parent or not _scope_ok(parent, "subtask.manage"):
+            return _scope_forbidden()
+        assignee = str(data.get("assignee") or "").strip()
+        if assignee and not auth_service.is_active_username(assignee):
+            return jsonify({"success": False, "error": "子任务负责人账号不存在或已停用"}), 400
+    elif "subtask.execute" in permissions:
+        if subtask.get("assignee") != _actor():
+            return _scope_forbidden("仅可更新本人负责的子任务")
+        forbidden = set(data) - {"status"}
+        if forbidden:
+            return jsonify({"success": False, "error": "执行人仅可更新子任务状态"}), 403
+        if "status" not in data:
+            return jsonify({"success": False, "error": "请提供子任务状态"}), 400
+    else:
+        auth_service.audit_denied(_actor(), "subtask.execute", {"method": request.method, "path": request.path})
+        return jsonify({"success": False, "error": "权限不足，无法更新子任务"}), 403
     try:
-        item = incident_service.update_subtask(subtask_id, _json_body(), actor=_actor())
+        item = incident_service.update_subtask(subtask_id, data, actor=_actor())
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 400
     if not item:
         return jsonify({"success": False, "error": "子任务不存在"}), 404
     return jsonify({"success": True, "data": item})
-
 
 @incident_bp.route("/subtasks/<subtask_id>", methods=["DELETE"])
 @require_perm("subtask.manage")
@@ -567,7 +691,7 @@ def delete_subtask(subtask_id):
     if not subtask:
         return jsonify({"success": False, "error": "子任务不存在"}), 404
     parent = incident_service.get_alert(subtask.get("alert_id"))
-    if parent and not _scope_ok(parent, "subtask.manage"):
+    if not parent or not _scope_ok(parent, "subtask.manage"):
         return _scope_forbidden()
     ok = incident_service.delete_subtask(subtask_id, actor=_actor())
     if not ok:
@@ -576,17 +700,21 @@ def delete_subtask(subtask_id):
 
 
 @incident_bp.route("/alerts/<alert_id>/related", methods=["GET"])
+@require_perm("alert.view")
 def related_alerts(alert_id):
     alert = incident_service.get_alert(alert_id)
     if not alert:
         return jsonify({"success": False, "error": "告警不存在"}), 404
     if not _read_ok(alert):
         return _read_forbidden()
-    items = incident_service.get_related_alerts(alert_id)
+    restrict, include_unassigned = _visibility_args()
+    items = incident_service.get_related_alerts(
+        alert_id, restrict_to_actor=restrict, include_unassigned=include_unassigned)
     return jsonify({"success": True, "data": {"alerts": items, "count": len(items)}})
 
 
 @incident_bp.route("/alerts/<alert_id>/correlation", methods=["GET"])
+@require_perm("alert.view")
 def alert_correlation(alert_id):
     alert = incident_service.get_alert(alert_id)
     if not alert:
@@ -594,15 +722,23 @@ def alert_correlation(alert_id):
     if not _read_ok(alert):
         return _read_forbidden()
     limit = request.args.get("limit", 20, type=int)
-    data = incident_service.get_alert_correlation(alert_id, limit=limit)
+    restrict, include_unassigned = _visibility_args()
+    data = incident_service.get_alert_correlation(
+        alert_id, limit=limit, restrict_to_actor=restrict, include_unassigned=include_unassigned)
     if data is None:
         return jsonify({"success": False, "error": "告警不存在"}), 404
     return jsonify({"success": True, "data": data})
 
 
 @incident_bp.route("/alerts/<alert_id>/export", methods=["GET"])
+@require_perm("alert.view")
 @require_perm("export")
 def export_alert(alert_id):
+    existing = incident_service.get_alert(alert_id)
+    if not existing:
+        return jsonify({"success": False, "error": "告警不存在"}), 404
+    if not _read_ok(existing):
+        return _read_forbidden()
     fmt = request.args.get("format", "json")
     data = incident_service.export_alert(alert_id, fmt)
     if data is None:
@@ -613,28 +749,37 @@ def export_alert(alert_id):
             mimetype="text/markdown; charset=utf-8",
             headers={"Content-Disposition": f"attachment; filename=alert-{alert_id}.md"},
         )
+    restrict, include_unassigned = _visibility_args()
+    correlation = incident_service.get_alert_correlation(
+        alert_id, limit=8, restrict_to_actor=restrict, include_unassigned=include_unassigned)
+    data["correlation"] = correlation or {"summary": {}, "entity_profiles": [], "related_alerts": []}
+    data["related"] = data["correlation"]["related_alerts"]
     return jsonify({"success": True, "data": data})
 
 
 @incident_bp.route("/stats", methods=["GET"])
+@require_perm("alert.view")
 def get_stats():
-    vis = _queue_vis()
-    restrict = None if vis == "all" else current_user()["username"]
-    include_unassigned = (vis == "own+unassigned")
+    restrict, include_unassigned = _visibility_args()
     return jsonify({"success": True, "data": incident_service.get_stats(restrict, include_unassigned)})
 
 
 @incident_bp.route("/operations/summary", methods=["GET"])
+@require_perm("alert.view")
 def get_operations_summary():
     days = request.args.get("days", 7, type=int)
-    return jsonify({"success": True, "data": incident_service.get_operations_summary(days)})
+    restrict, include_unassigned = _visibility_args()
+    data = incident_service.get_operations_summary(days, restrict, include_unassigned)
+    return jsonify({"success": True, "data": data})
 
 
 @incident_bp.route("/operations/export", methods=["GET"])
+@require_perm("alert.view")
 @require_perm("export")
 def export_operations():
     days = request.args.get("days", 7, type=int)
-    data = incident_service.export_operations_csv(days)
+    restrict, include_unassigned = _visibility_args()
+    data = incident_service.export_operations_csv(days, restrict, include_unassigned)
     return Response(
         data,
         mimetype="text/csv; charset=utf-8",
@@ -691,7 +836,9 @@ def upload_image():
     file_storage = request.files["image"]
     if file_storage.filename == "":
         return jsonify({"success": False, "error": "未选择文件"}), 400
-    info, err = incident_service.save_image(file_storage)
+    if not auth_service.has_scope_bypass(current_user()):
+        return _scope_forbidden("旧版独立图片上传仅限管理员使用，请从具体告警上传附件")
+    info, err = incident_service.save_image(file_storage, actor=_actor())
     if err:
         return jsonify({"success": False, "error": err}), 400
     return jsonify({"success": True, "data": info})
@@ -704,7 +851,7 @@ def upload_alert():
         file_storage = request.files["alert"]
         if file_storage.filename == "":
             return jsonify({"success": False, "error": "未选择文件"}), 400
-        meta, err = incident_service.save_alert_from_file(file_storage)
+        meta, err = incident_service.save_alert_from_file(file_storage, actor=_actor())
         if err:
             return jsonify({"success": False, "error": err}), 400
         return jsonify({"success": True, "data": meta})
@@ -715,15 +862,25 @@ def upload_alert():
             return jsonify({"success": False, "error": "JSON 解析失败"}), 400
         if not isinstance(raw, dict):
             return jsonify({"success": False, "error": "告警 JSON 必须是对象"}), 400
-        meta = incident_service.save_alert_from_json(raw)
+        meta = incident_service.save_alert_from_json(raw, actor=_actor())
         return jsonify({"success": True, "data": meta})
 
     return jsonify({"success": False, "error": "请通过文件上传或 JSON 提交告警"}), 400
 
 
 @incident_bp.route("/images", methods=["GET"])
+@require_perm("alert.view")
 def list_images():
-    images = incident_service.list_images()
+    images = []
+    username = current_user()["username"]
+    for item in incident_service.list_images():
+        parent_id = item.get("alert_id")
+        if parent_id:
+            parent = incident_service.get_alert(parent_id)
+            if parent and _read_ok(parent, audit_denial=False):
+                images.append(item)
+        elif auth_service.has_scope_bypass(current_user()) or item.get("uploaded_by") == username:
+            images.append(item)
     return jsonify({"success": True, "data": {"images": images, "count": len(images)}})
 
 
@@ -731,19 +888,33 @@ def list_images():
 @require_perm("attachment.write")
 def delete_image(image_id):
     item = incident_service.get_attachment(image_id)
-    if item and item.get("alert_id"):
-        parent = incident_service.get_alert(item["alert_id"])
-        if parent and not _scope_ok(parent, "attachment.write"):
-            return _scope_forbidden()
-    ok = incident_service.delete_image(image_id)
-    if not ok:
+    if not item:
         return jsonify({"success": False, "error": "图片不存在"}), 404
-    return jsonify({"success": True})
+    if item.get("alert_id"):
+        parent = incident_service.get_alert(item["alert_id"])
+        if not parent or not _scope_ok(parent, "attachment.write"):
+            return _scope_forbidden()
+    elif not (auth_service.has_scope_bypass(current_user())
+              or item.get("uploaded_by") == current_user()["username"]):
+        return _scope_forbidden()
+    ok = incident_service.delete_image(image_id, actor=_actor())
+    return jsonify({"success": bool(ok)})
 
 
 @incident_bp.route("/files/<path:filepath>", methods=["GET"])
+@require_perm("alert.view")
 def serve_file(filepath):
-    full = incident_service.resolve_file_path(filepath)
+    item = incident_service.get_attachment_by_path(filepath)
+    if not item:
+        return jsonify({"success": False, "error": "文件不存在"}), 404
+    if item.get("alert_id"):
+        parent = incident_service.get_alert(item["alert_id"])
+        if not parent or not _read_ok(parent):
+            return _read_forbidden()
+    elif not (auth_service.has_scope_bypass(current_user())
+              or item.get("uploaded_by") == current_user()["username"]):
+        return _read_forbidden()
+    full = incident_service.resolve_file_path(item["rel_path"])
     if not full or not full.is_file():
         return jsonify({"success": False, "error": "文件不存在"}), 404
     # 文本类日志以 text/plain 内联返回，便于浏览器直接查看（而非下载）
@@ -754,13 +925,16 @@ def serve_file(filepath):
 
 
 @incident_bp.route("/export", methods=["GET"])
+@require_perm("alert.view")
 @require_perm("export")
 def export_session():
-    return jsonify({"success": True, "data": incident_service.export_all()})
+    restrict, include_unassigned = _visibility_args()
+    data = incident_service.export_all(restrict, include_unassigned)
+    return jsonify({"success": True, "data": data})
 
 
 @incident_bp.route("/clear", methods=["POST"])
 @require_perm("data.clear")
 def clear_session():
-    incident_service.clear_all()
+    incident_service.clear_all(actor=_actor())
     return jsonify({"success": True})

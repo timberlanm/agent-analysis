@@ -32,11 +32,14 @@ router.beforeEach(async (to) => {
 
   if (to.meta.public) {
     // 已登录用户访问登录页 -> 回工作台
-    if (to.name === 'Login' && auth.isAuthenticated) return { path: '/incident' }
+    if (to.name === 'Login' && auth.isAuthenticated && !auth.mustChangePassword) return { path: '/incident' }
     return true
   }
 
   if (!auth.isAuthenticated) {
+    return { path: '/login', query: { redirect: to.fullPath } }
+  }
+  if (auth.mustChangePassword) {
     return { path: '/login', query: { redirect: to.fullPath } }
   }
   return true
