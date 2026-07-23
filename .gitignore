@@ -36,6 +36,9 @@ backend/data/secret_key
 # CodeBuddy
 .codebuddy/
 
+# Claude
+.claude/
+
 # Logs
 *.log
 flask.log

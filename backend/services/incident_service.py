@@ -777,6 +777,10 @@ def extract_entities(raw: Any, normalized: Optional[Dict[str, Any]] = None) -> L
 def create_alert(raw: Dict[str, Any], actor: str = DEFAULT_ACTOR) -> Dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError("告警内容必须是 JSON 对象")
+    # 冗余自保：无论哪个入口调用，service 层自身始终剥离受保护字段，
+    # 避免因调用方遗漏 pop 而导致客户端越权设置 owner/status/conclusion 等。
+    # 各调用方的 pop 保留为额外加固，互不影响。
+    raw = _sanitize_ingest_payload(raw)
     init_db()
 
     normalized_alert = _normalize_alert(raw)

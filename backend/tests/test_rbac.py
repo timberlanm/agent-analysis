@@ -171,15 +171,50 @@ def test_audit_hardening(rbac):
     assert v2["ok"] is False and v2["broken_at"]
 
 
-# ============ Phase 4：不启用失败锁定 ============
+# ============ Phase 4：登录失败锁定 ============
 
-def test_no_lockout(rbac):
+def test_login_lockout(rbac):
+    """连续失败达到阈值后账号被临时锁定，正确口令也无法登录；
+    锁定不改账号 status（管理员重置口令/启用账号时自动清零）。"""
     rbac.create_user("u1", ["analyst"])
-    for _ in range(8):
-        assert rbac.anon().post("/api/auth/login", json={"username": "u1", "password": "wrong"}).status_code == 401
-    # 仍可正常登录
+    pw = "Passw0rd!2026"
+
+    # 阈值前 7 次失败：返回「用户名或口令错误」
+    for _ in range(auth_service.LOGIN_FAILURE_THRESHOLD - 1):
+        r = rbac.anon().post("/api/auth/login", json={"username": "u1", "password": "wrong"})
+        assert r.status_code == 401
+        assert "锁定" not in r.get_json().get("error", "")
+
+    # 第 8 次失败：触发锁定，返回锁定提示
+    r = rbac.anon().post("/api/auth/login", json={"username": "u1", "password": "wrong"})
+    assert r.status_code == 401
+    assert "锁定" in r.get_json()["error"]
+
+    # 锁定后正确口令也无法登录
+    r = rbac.anon().post("/api/auth/login", json={"username": "u1", "password": pw})
+    assert r.status_code == 401
+    assert "锁定" in r.get_json()["error"]
+
+    # 账号 status 仍为 active（临时锁定不改状态）
+    row = auth_service._get_user_row_by_username("u1")
+    assert row["status"] == "active"
+    assert row["failed_login_count"] >= auth_service.LOGIN_FAILURE_THRESHOLD
+    assert row["locked_until"] is not None
+
+    # 管理员重置口令/启用账号时自动清零（模拟 admin_reset_password 的清零效果）
+    import sqlite3
+    conn = sqlite3.connect(isvc.DB_PATH)
+    conn.execute(
+        "UPDATE users SET failed_login_count = 0, locked_until = NULL WHERE username = 'u1'"
+    )
+    conn.commit()
+    conn.close()
+
+    # 清零后可正常登录
     assert rbac.login("u1")
-    assert auth_service._get_user_row_by_username("u1")["status"] == "active"
+    row = auth_service._get_user_row_by_username("u1")
+    assert row["failed_login_count"] == 0
+    assert row["locked_until"] is None
 
 
 # ============ Phase 5：可配置权限 ============
@@ -210,3 +245,67 @@ def test_configurable_permissions(rbac):
     # admin 始终拥有全部权限
     matrix = root.get("/api/auth/permissions").get_json()["data"]["matrix"]
     assert set(matrix["admin"]) == set(auth_service.ALL_PERMISSIONS)
+
+
+# ============ Phase 6：H1 回归 - 双角色执行人不可升级到全字段编辑 ============
+
+def _new_subtask(client, alert_id, assignee, title="子任务"):
+    r = client.post(f"/api/incident/alerts/{alert_id}/subtasks",
+                    json={"title": title, "assignee": assignee, "team": "应急组"})
+    assert r.status_code == 200, r.get_json()
+    return r.get_json()["data"]["id"]
+
+
+def test_h1_dualrole_assignee_cannot_escalate(rbac):
+    """双角色(responder+analyst)用户作为子任务执行人时，只能改 status，
+    不能因同时持有 subtask.manage 而升级到全字段编辑（H1 垂直越权）。"""
+    rbac.create_user("root", ["admin"])
+    rbac.create_user("ana", ["analyst"])
+    # 双角色用户：同时持有 subtask.manage（来自 analyst）和 subtask.execute（来自 responder）
+    rbac.create_user("dual", ["responder", "analyst"])
+    root, ana, dual = rbac.login("root"), rbac.login("ana"), rbac.login("dual")
+
+    # ana 创建告警；用 admin 把 dual 设为处理人（analyst 无权改派他人）
+    aid = _new_alert(ana, "H1回归告警")
+    assert root.put(f"/api/incident/alerts/{aid}/handlers", json={"names": ["ana", "dual"]}).status_code == 200
+    # ana 创建子任务，指派给 dual（dual 成为该子任务执行人）
+    sid = _new_subtask(ana, aid, assignee="dual", title="原始标题")
+
+    # dual 作为执行人，尝试改 title -> 应被拒（即使持有 subtask.manage）
+    r = dual.put(f"/api/incident/subtasks/{sid}", json={"title": "被篡改的标题"})
+    assert r.status_code == 403, f"执行人不应能改 title, got {r.status_code}"
+    # 改 due_at -> 应被拒
+    r = dual.put(f"/api/incident/subtasks/{sid}", json={"due_at": "2099-12-31T23:59:59"})
+    assert r.status_code == 403, f"执行人不应能改 due_at, got {r.status_code}"
+    # 改 assignee（甩锅）-> 应被拒
+    r = dual.put(f"/api/incident/subtasks/{sid}", json={"assignee": "ana"})
+    assert r.status_code == 403, f"执行人不应能改 assignee, got {r.status_code}"
+    # 改 status -> 应成功（执行人本职能力）
+    r = dual.put(f"/api/incident/subtasks/{sid}", json={"status": "doing"})
+    assert r.status_code == 200, f"执行人应能改 status, got {r.status_code}: {r.get_json()}"
+
+    # 验证 title 未被篡改
+    subs = ana.get(f"/api/incident/alerts/{aid}/subtasks").get_json()["data"]["subtasks"]
+    target = next(s for s in subs if s["id"] == sid)
+    assert target["title"] == "原始标题", f"title 被篡改为 {target['title']!r}"
+    assert target["status"] == "doing"
+
+
+def test_h1_non_assignee_with_manage_can_edit(rbac):
+    """持有 subtask.manage 但不是该子任务执行人的用户（如研判员），仍可全字段编辑。
+    确保修复未误伤管理员/研判员的正常子任务管理能力。"""
+    rbac.create_user("root", ["admin"])
+    rbac.create_user("ana", ["analyst"])
+    rbac.create_user("resp", ["responder"])
+    root, ana, resp = rbac.login("root"), rbac.login("ana"), rbac.login("resp")
+
+    aid = _new_alert(ana, "正常管理告警")
+    ana.put(f"/api/incident/alerts/{aid}/handlers", json={"names": ["ana"]})
+    sid = _new_subtask(ana, aid, assignee="resp", title="待处置")
+
+    # ana 是 handler 且持有 subtask.manage，但不是该子任务执行人 -> 可改 title
+    r = ana.put(f"/api/incident/subtasks/{sid}", json={"title": "研判员改的标题"})
+    assert r.status_code == 200, f"研判员应能管理子任务, got {r.status_code}: {r.get_json()}"
+    # resp 是执行人，只能改 status
+    r = resp.put(f"/api/incident/subtasks/{sid}", json={"title": "处置人改的"})
+    assert r.status_code == 403

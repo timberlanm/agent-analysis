@@ -57,11 +57,11 @@ class RBAC:
     def __init__(self, app):
         self.app = app
 
-    def create_user(self, username, roles, pw="Passw0rd!23"):
+    def create_user(self, username, roles, pw="Passw0rd!2026"):
         auth_service.create_user(username, pw, username, roles, actor="system", must_change=False)
         return pw
 
-    def login(self, username, pw="Passw0rd!23"):
+    def login(self, username, pw="Passw0rd!2026"):
         c = self.app.test_client()
         r = c.post("/api/auth/login", json={"username": username, "password": pw})
         assert r.status_code == 200, r.get_json()

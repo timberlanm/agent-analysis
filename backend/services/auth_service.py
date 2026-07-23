@@ -162,7 +162,9 @@ ROLE_DEFAULT_SCOPES = {
 }
 ADMIN_ONLY_PERMISSIONS = {"alert.delete", "system.manage", "data.clear"}
 MIN_PASSWORD_LEN = 12
-# 不启用「登录失败自动锁定」策略；失败尝试仍会记入审计(login_failed)以便排查。
+# 登录失败锁定策略：连续失败达到阈值后临时锁定账号，防止暴力破解。
+LOGIN_FAILURE_THRESHOLD = 8
+LOGIN_LOCK_MINUTES = 15
 SESSION_IDLE_MINUTES = 60
 SESSION_ABSOLUTE_HOURS = 12
 # 会话最近活跃时间的写入节流阈值（秒）：并发页面加载时避免每个请求都写库抢锁。
@@ -727,16 +729,39 @@ def change_password(user_id: str, old_password: str, new_password: str) -> Tuple
 
 
 # ============ 登录 ============
-# 不启用「失败自动锁定」；仅把失败尝试记入审计以便排查异常访问。
+# 失败计数 + 临时锁定：达到阈值后锁定账号一段时间，防止暴力破解。
+# 锁定按账号，不按 IP（口令喷洒攻击者会换 IP）；失败 IP 仍记入审计以便排查。
 
 def _register_failure(user_row, ip: str) -> None:
-    _audit("login_failed", "auth", user_row["id"], user_row["username"], after={"ip": ip})
+    """递增失败计数，达到阈值时设置锁定到期时间。"""
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+    with _conn() as conn:
+        conn.execute(
+            "UPDATE users SET failed_login_count = failed_login_count + 1, updated_at = ? WHERE id = ?",
+            (now_iso, user_row["id"]),
+        )
+        row = conn.execute(
+            "SELECT failed_login_count FROM users WHERE id = ?", (user_row["id"],)
+        ).fetchone()
+    count = row["failed_login_count"] if row else 0
+    locked = count >= LOGIN_FAILURE_THRESHOLD
+    if locked:
+        lock_until = (now + timedelta(minutes=LOGIN_LOCK_MINUTES)).isoformat()
+        with _conn() as conn:
+            conn.execute(
+                "UPDATE users SET locked_until = ?, updated_at = ? WHERE id = ?",
+                (lock_until, now_iso, user_row["id"]),
+            )
+    _audit("login_failed", "auth", user_row["id"], user_row["username"],
+           after={"ip": ip, "failed_count": count, "locked": locked})
 
 
 def _register_success(user_id: str) -> None:
     with _conn() as conn:
         conn.execute(
-            "UPDATE users SET last_login_at = ?, updated_at = ? WHERE id = ?",
+            "UPDATE users SET last_login_at = ?, failed_login_count = 0, "
+            "locked_until = NULL, updated_at = ? WHERE id = ?",
             (_now(), _now(), user_id),
         )
 
@@ -753,8 +778,19 @@ def verify_login(username: str, password: str, ip: str = "", user_agent: str = "
     if row["status"] == "disabled":
         _audit("login_failed", "auth", row["id"], username, after={"reason": "disabled", "ip": ip})
         return None, "账号已停用,请联系管理员"
+    # 检查临时锁定
+    locked_until = _parse_dt(row["locked_until"])
+    if locked_until and datetime.now(timezone.utc) < locked_until:
+        remaining = int((locked_until - datetime.now(timezone.utc)).total_seconds() // 60) + 1
+        _audit("login_failed", "auth", row["id"], username,
+               after={"reason": "locked", "ip": ip, "locked_until": row["locked_until"]})
+        return None, f"账号已锁定，请约 {remaining} 分钟后重试"
     if not check_password_hash(row["password_hash"], password):
         _register_failure(row, ip)
+        # 锁定后重新读取以判断是否刚触发
+        fresh = _get_user_row_by_username(username)
+        if fresh and fresh["locked_until"]:
+            return None, "登录失败次数过多，账号已被临时锁定"
         return None, "用户名或口令错误"
     _register_success(row["id"])
     _audit("login", "auth", row["id"], username, after={"ip": ip})

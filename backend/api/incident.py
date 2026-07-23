@@ -17,11 +17,17 @@ UPLOAD_BASE = incident_service.UPLOAD_BASE
 
 
 def _actor() -> str:
-    """操作者 = 已登录用户名。会话缺失时回退到旧的请求头/参数（仅兜底）。"""
+    """操作者 = 已登录用户名。
+
+    所有 /api/incident/* 接口均由 _require_login 强制登录，正常请求中
+    g.current_user 必然存在。若因路由调整等意外导致此处拿不到登录用户，
+    绝不可信任客户端头/参数（历史遗留的 X-User / actor 曾是身份伪造后门），
+    返回固定常量以安全降级，避免污染归属与审计。
+    """
     user = getattr(g, "current_user", None)
     if user:
         return user["username"]
-    return request.headers.get("X-User") or request.args.get("actor") or "operator"
+    return "anonymous"
 
 
 @incident_bp.before_request
@@ -659,25 +665,31 @@ def update_subtask(subtask_id):
     parent = incident_service.get_alert(subtask.get("alert_id"))
     data = _json_body()
     permissions = current_user().get("permissions", set())
-    if "subtask.manage" in permissions:
+    actor = _actor()
+    # 执行人身份优先：当调用者正是该子任务的指派执行人时，无论其是否同时持有
+    # subtask.manage（双角色场景），都强制按「执行人」语义处理——只能更新 status，
+    # 避免因角色叠加而升级到全字段编辑（H1 垂直越权）。
+    is_assignee = subtask.get("assignee") == actor
+    if is_assignee and "subtask.execute" in permissions:
+        forbidden = set(data) - {"status"}
+        if forbidden:
+            return jsonify({"success": False, "error": "执行人仅可更新子任务状态"}), 403
+        if "status" not in data:
+            return jsonify({"success": False, "error": "请提供子任务状态"}), 400
+    elif "subtask.manage" in permissions:
         if not parent or not _scope_ok(parent, "subtask.manage"):
             return _scope_forbidden()
         assignee = str(data.get("assignee") or "").strip()
         if assignee and not auth_service.is_active_username(assignee):
             return jsonify({"success": False, "error": "子任务负责人账号不存在或已停用"}), 400
     elif "subtask.execute" in permissions:
-        if subtask.get("assignee") != _actor():
-            return _scope_forbidden("仅可更新本人负责的子任务")
-        forbidden = set(data) - {"status"}
-        if forbidden:
-            return jsonify({"success": False, "error": "执行人仅可更新子任务状态"}), 403
-        if "status" not in data:
-            return jsonify({"success": False, "error": "请提供子任务状态"}), 400
+        # 持有 execute 但不是该子任务执行人 -> 拒绝
+        return _scope_forbidden("仅可更新本人负责的子任务")
     else:
-        auth_service.audit_denied(_actor(), "subtask.execute", {"method": request.method, "path": request.path})
+        auth_service.audit_denied(actor, "subtask.execute", {"method": request.method, "path": request.path})
         return jsonify({"success": False, "error": "权限不足，无法更新子任务"}), 403
     try:
-        item = incident_service.update_subtask(subtask_id, data, actor=_actor())
+        item = incident_service.update_subtask(subtask_id, data, actor=actor)
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 400
     if not item:
