@@ -4,6 +4,14 @@ cd /d "%~dp0"
 title 研判分析工作台
 setlocal enabledelayedexpansion
 
+:: Load machine-local database settings. The file is gitignored and may hold
+:: development credentials without changing the shared launcher.
+if exist ".env.postgres.local" (
+    for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env.postgres.local") do (
+        if not "%%A"=="" if not defined %%A set "%%A=%%B"
+    )
+)
+
 echo ========================================
 echo   研判分析工作台
 echo ========================================
@@ -23,7 +31,7 @@ if errorlevel 1 (
 
 :: 检查后端依赖
 echo [1/4] 检查 Python 依赖...
-pip show Flask >nul 2>&1
+python -c "import flask, sqlalchemy, psycopg, alembic" >nul 2>&1
 if errorlevel 1 (
     echo [INFO] 安装 Python 依赖...
     pip install -r backend\requirements.txt

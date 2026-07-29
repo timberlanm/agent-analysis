@@ -1,0 +1,19 @@
+==============================================================================
+ Proofpoint 邮件网关  取证日志导出
+ 导出时间: 2026-06-19 01:52:57  时区: Asia/Shanghai (UTC+8)
+ 关联规则: MAIL-PHISH-7720  仿冒猎头主题 + 新注册域名链接
+ ATT&CK: T1566.002 Spearphishing Link
+==============================================================================
+
+2026-06-13 09:12:00  HOST  EventID=1 (ProcessCreate / Auth)
+  Computer: HOST
+  User: chen.jing@corp.com
+  Image/Process: -
+  CommandLine: -
+  ParentImage: -
+  Action: -
+  Hashes: SHA256=-
+
+VERDICT: TRUE_POSITIVE
+KeyEvidence: 新注册域名 hr-recruit2026.com；猎头钓鱼主题；跳转 telemetry-sync.net；收件人 chen.jing
+Handling: 全域召回同源邮件、封禁发件与跳转域名，对 chen.jing 终端 FIN-PC-22 立即应急排查。

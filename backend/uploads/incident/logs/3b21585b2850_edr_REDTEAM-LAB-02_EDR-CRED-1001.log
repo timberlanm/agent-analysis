@@ -1,0 +1,19 @@
+==============================================================================
+ Microsoft Defender for Endpoint  取证日志导出
+ 导出时间: 2026-06-19 01:46:46  时区: Asia/Shanghai (UTC+8)
+ 关联规则: EDR-CRED-1001  Mimikatz sekurlsa 内存读取
+ ATT&CK: T1003.001 LSASS Memory
+==============================================================================
+
+2026-06-16 15:30:00  REDTEAM-LAB-02  EventID=1 (ProcessCreate / Auth)
+  Computer: REDTEAM-LAB-02
+  User: LAB\pentester
+  Image/Process: C:\Tools\mimikatz\x64\mimikatz.exe
+  CommandLine: mimikatz.exe "privilege::debug" "sekurlsa::logonpasswords" exit
+  ParentImage: powershell.exe
+  Action: -
+  Hashes: SHA256=61c0810a23e9c5d0e1b2f3a4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8
+
+VERDICT: FALSE_POSITIVE
+KeyEvidence: 主机位于隔离演练网段 10.99.0.0/24；操作账号 pentester；已匹配变更单 CHG-2026-0612
+Handling: 确认为授权红队演练，关闭告警并加入演练白名单，演练结束后复核。

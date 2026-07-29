@@ -1,0 +1,16 @@
+==============================================================================
+ 科来 NDR  取证日志导出
+ 导出时间: 2026-06-19 01:52:58  时区: Asia/Shanghai (UTC+8)
+ 关联规则: NDR-C2-3140  固定间隔信标 + 恶意 JA3 指纹
+ ATT&CK: T1071.001 Web Protocols
+==============================================================================
+
+2026-06-13 10:02:00  flow  proto=TCP/TLS
+  10.22.4.22:52880 -> 91.219.236.18:443
+  domain/sni: telemetry-sync.net
+  url: https://telemetry-sync.net/api/v1/poll
+  detection: 固定间隔信标 + 恶意 JA3 指纹 (NDR-C2-3140)
+
+VERDICT: TRUE_POSITIVE
+KeyEvidence: 60s±抖动周期信标；JA3 命中已知 C2；目标 telemetry-sync.net/91.219.236.18
+Handling: DNS/IP 双向封禁，提取 Beacon 配置研判 C2 框架与 sleep/jitter，关联终端进程。

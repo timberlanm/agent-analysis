@@ -1,0 +1,16 @@
+==============================================================================
+ 科来 NDR  取证日志导出
+ 导出时间: 2026-06-19 01:46:48  时区: Asia/Shanghai (UTC+8)
+ 关联规则: NDR-MINER-3208  Stratum 挖矿协议握手
+ ATT&CK: T1496 Resource Hijacking
+==============================================================================
+
+2026-06-18 02:41:00  flow  proto=TCP/Stratum
+  10.60.3.5:49920 -> 51.91.23.140:3333
+  domain/sni: pool.minexmr-fast.com
+  url: -
+  detection: Stratum 挖矿协议握手 (NDR-MINER-3208)
+
+VERDICT: UNDER_INVESTIGATION
+KeyEvidence: Stratum mining.subscribe 握手；目标矿池 pool.minexmr-fast.com:3333；与 crontab 持久化同主机
+Handling: 封禁矿池地址，定位挖矿进程与持久化，结合该主机 HIDS 告警整体处置。

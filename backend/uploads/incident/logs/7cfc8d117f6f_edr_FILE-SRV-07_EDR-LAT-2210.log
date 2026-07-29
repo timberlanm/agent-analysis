@@ -1,0 +1,23 @@
+==============================================================================
+ 奇安信 天擎 EDR  取证日志导出
+ 导出时间: 2026-06-19 01:46:45  时区: Asia/Shanghai (UTC+8)
+ 关联规则: EDR-LAT-2210  PSEXESVC 服务安装 + ADMIN$ 写入
+ ATT&CK: T1021.002 SMB Admin Shares
+==============================================================================
+
+2026-06-17 22:48:00  FILE-SRV-07  EventID=1 (ProcessCreate / Auth)
+  Computer: FILE-SRV-07
+  User: CORP\administrator
+  Image/Process: PSEXESVC.exe
+  CommandLine: C:\Windows\PSEXESVC.exe
+  ParentImage: services.exe
+  Action: -
+  Hashes: SHA256=3c6d8f0a2b4e6c8d0f2a4b6c8e0d2f4a6b8c0e2d4f6a8b0c2e4d6f8a0b2c4e6d
+
+2026-06-17 22:48:00  FILE-SRV-07  EventID=3 (NetworkConnect)
+  SourceIp: 10.22.7.118  DestinationIp: 10.30.5.7:445
+  DestinationHostname: -
+
+VERDICT: UNDER_INVESTIGATION
+KeyEvidence: ADMIN$ 写入 PSEXESVC.exe；services.exe 拉起服务；源主机为已失陷的 HR-PC-118
+Handling: 隔离源主机与目标主机，重置 administrator 口令，审计域内 PsExec 使用情况。

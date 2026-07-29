@@ -1,0 +1,16 @@
+==============================================================================
+ 天眼 NDR  取证日志导出
+ 导出时间: 2026-06-19 01:46:48  时区: Asia/Shanghai (UTC+8)
+ 关联规则: NDR-EXFIL-3401  非工作时段异常大流量外传
+ ATT&CK: T1567.002 Exfiltration to Cloud Storage
+==============================================================================
+
+2026-06-18 03:12:00  flow  proto=TCP/TLS
+  10.18.32.41:52210 -> 13.227.74.30:443
+  domain/sni: upload.mega-share.io
+  url: https://upload.mega-share.io/v2/files
+  detection: 非工作时段异常大流量外传 (NDR-EXFIL-3401)
+
+VERDICT: UNDER_INVESTIGATION
+KeyEvidence: 凌晨上行 6.8GB 至 mega-share.io；远超基线；源主机 FIN-DB-03 此前有 LSASS 转储告警
+Handling: 阻断外联会话，核查上传内容与数据库导出记录，按数据泄露事件升级处置。

@@ -58,7 +58,7 @@ export default { name: 'Incident' }
               v-model="filters.keyword"
               size="small"
               clearable
-              placeholder="搜索 IP / 主机 / Hash / 标题"
+              placeholder="搜索告警编号 / IP / 主机 / Hash / 标题"
               class="filter-keyword"
               @keyup.enter="loadAlerts"
               @clear="loadAlerts"
@@ -116,13 +116,24 @@ export default { name: 'Incident' }
           height="100%"
           class="alert-table"
           highlight-current-row
-          @row-click="selectAlert"
+          @row-click="handleAlertRowClick"
           @selection-change="handleSelectionChange"
         >
           <el-table-column type="selection" width="42" />
+          <el-table-column prop="alert_no" label="告警编号" width="190">
+            <template #default="{ row }">
+              <button
+                class="alert-no"
+                :title="`复制告警编号 ${row.alert_no}`"
+                @click.stop="copyAlertNo(row.alert_no)"
+              >
+                {{ row.alert_no || '-' }}
+              </button>
+            </template>
+          </el-table-column>
           <el-table-column prop="title" label="标题" min-width="220">
             <template #default="{ row }">
-              <div class="alert-title-cell">
+              <div class="alert-title-cell" :title="row.title">
                 <span>{{ row.title || '未命名告警' }}</span>
               </div>
               <div class="muted-line">{{ row.source_category_label || '其他 / 通用' }} · {{ row.source_system || '未知来源' }} · {{ row.alert_type || '未分类' }}</div>
@@ -208,7 +219,14 @@ export default { name: 'Incident' }
           <div class="detail-header">
             <div>
               <div class="detail-title">
-                <span>{{ selectedAlert.title }}</span>
+                <button
+                  class="alert-no detail-alert-no"
+                  :title="`复制告警编号 ${selectedAlert.alert_no}`"
+                  @click="copyAlertNo(selectedAlert.alert_no)"
+                >
+                  {{ selectedAlert.alert_no || '-' }}
+                </button>
+                <span :title="selectedAlert.title">{{ selectedAlert.title }}</span>
               </div>
               <div class="detail-meta">
                 {{ selectedAlert.source_category_label || '其他 / 通用' }} · {{ selectedAlert.source_system || '未知来源' }} · {{ selectedAlert.alert_type || '未分类' }} · {{ formatTime(selectedAlert.occurred_at) }}
@@ -256,15 +274,6 @@ export default { name: 'Incident' }
               <el-button v-if="hasPerm('attachment.write')" size="small" type="primary" plain @click="attachmentInputRef?.click()">
                 <el-icon><Upload /></el-icon>上传 / 粘贴截图
               </el-button>
-              <el-button
-                v-if="imageAttachments.length"
-                size="small"
-                plain
-                :loading="ocrLoading"
-                @click="runOcr"
-              >
-                <el-icon v-if="!ocrLoading"><Search /></el-icon>从截图识别字段
-              </el-button>
               <span>设备截图即为研判主依据；可拖拽文件到此、点击上传或 Ctrl+V 粘贴</span>
             </div>
             <div v-if="isDragging" class="evidence-drop-hint">松开鼠标即可上传到本告警</div>
@@ -278,10 +287,14 @@ export default { name: 'Incident' }
                   hide-on-click-modal
                   preview-teleported
                 />
-                <div class="evidence-shot-bar">
-                  <span :title="att.original_name">{{ att.original_name }}</span>
-                  <button class="attachment-delete" @click="removeAttachment(att)"><el-icon><Delete /></el-icon></button>
-                </div>
+                <button
+                  class="attachment-delete evidence-shot-delete"
+                  :aria-label="`删除截图 ${att.original_name}`"
+                  title="删除截图"
+                  @click.stop="removeAttachment(att)"
+                >
+                  <el-icon><Delete /></el-icon>
+                </button>
               </div>
             </div>
             <div v-else class="evidence-empty" @click="attachmentInputRef?.click()">
@@ -294,12 +307,15 @@ export default { name: 'Incident' }
                 v-for="att in otherAttachments"
                 :key="att.id"
                 class="evidence-file-chip"
-                :title="`${att.original_name}（点击查看 / 下载）`"
+                :class="{ 'is-missing': att.file_available === false }"
+                :title="att.file_available === false
+                  ? `${att.original_name}（源文件缺失）`
+                  : `${att.original_name}（点击下载）`"
                 @click="openAttachment(att)"
               >
                 <el-icon><Document /></el-icon>
                 <span>{{ att.original_name }}</span>
-                <small>{{ attachmentTypeLabel(att.file_type) }}</small>
+                <small>{{ att.file_available === false ? '文件缺失' : attachmentTypeLabel(att.file_type) }}</small>
                 <button class="attachment-delete" @click.stop="removeAttachment(att)"><el-icon><Delete /></el-icon></button>
               </div>
             </div>
@@ -565,7 +581,12 @@ export default { name: 'Incident' }
             </el-select>
           </el-form-item>
           <el-form-item label="告警名称" required>
-            <el-input v-model="createForm.title" placeholder="例如：可疑 PowerShell 执行行为" />
+            <el-input
+              v-model="createForm.title"
+              maxlength="120"
+              show-word-limit
+              placeholder="例如：可疑 PowerShell 执行行为"
+            />
           </el-form-item>
           <el-form-item label="攻击 IP" required>
             <el-input v-model="createForm.source_ip" placeholder="攻击来源 IP" />
@@ -634,15 +655,9 @@ export default { name: 'Incident' }
               v-model="createForm.description"
               type="textarea"
               :rows="5"
-              placeholder="粘贴安全设备中的告警详情；也可在此直接 Ctrl+V 粘贴截图。粘贴文本会自动识别其中的 IP / 域名 / Hash / 命令行等并填入对应字段"
+              placeholder="粘贴或输入安全设备中的告警详情；也可在此直接 Ctrl+V 粘贴截图"
               @paste.capture="handleDetailPaste"
             />
-            <div class="detail-extract-bar">
-              <el-button size="small" plain :loading="textExtracting" @click="extractFieldsFromDetail">
-                <el-icon v-if="!textExtracting"><Search /></el-icon>从文本识别字段
-              </el-button>
-              <span class="detail-extract-hint">从上方文本提取 IP / 域名 / Hash / 命令行等，填入对应字段（仅填空、可再编辑）</span>
-            </div>
           </el-form-item>
 
           <div class="screenshot-section span-2">
@@ -693,16 +708,39 @@ export default { name: 'Incident' }
 
           <el-form-item label="其他附件" class="span-2">
             <input ref="createAttachmentInputRef" hidden type="file" multiple @change="handleCreateAttachmentPick" />
-            <div
-              class="create-attachments"
-              tabindex="0"
-              @click="createAttachmentInputRef?.click()"
-              @dragover.prevent
-              @drop.prevent="handleCreateAttachmentDrop"
-              @paste="handleCreateAttachmentPaste"
-            >
-              <el-icon><Upload /></el-icon>
-              <span>{{ createFiles.length ? `已选择 ${createFiles.length} 个文件` : '点击选择、拖拽文件到此，或聚焦后 Ctrl+V 粘贴（PCAP/PCAPNG、日志、日志压缩包、图片等）' }}</span>
+            <div class="create-attachment-field">
+              <div
+                class="create-attachments"
+                tabindex="0"
+                @click="createAttachmentInputRef?.click()"
+                @dragover.prevent
+                @drop.prevent="handleCreateAttachmentDrop"
+                @paste="handleCreateAttachmentPaste"
+              >
+                <el-icon><Upload /></el-icon>
+                <span>{{ createFiles.length ? `继续添加附件（当前 ${createFiles.length} 个）` : '点击选择、拖拽文件到此，或聚焦后 Ctrl+V 粘贴（PCAP/PCAPNG、日志、日志压缩包、图片等）' }}</span>
+              </div>
+              <div v-if="createFiles.length" class="create-file-list">
+                <div
+                  v-for="(file, index) in createFiles"
+                  :key="`${file.name}-${file.size}-${file.lastModified}-${index}`"
+                  class="create-file-item"
+                >
+                  <el-icon><Document /></el-icon>
+                  <span class="create-file-name" :title="file.name">{{ file.name }}</span>
+                  <small>{{ formatFileSize(file.size) }}</small>
+                  <el-tooltip content="移除此附件" placement="top">
+                    <button
+                      type="button"
+                      class="remove-field-button create-file-remove"
+                      :aria-label="`移除附件 ${file.name}`"
+                      @click="removeCreateFile(index)"
+                    >
+                      <el-icon><Delete /></el-icon>
+                    </button>
+                  </el-tooltip>
+                </div>
+              </div>
             </div>
           </el-form-item>
           <div class="form-actions span-2">
@@ -728,7 +766,12 @@ export default { name: 'Incident' }
       </el-form>
     </el-dialog>
 
-    <el-dialog v-model="assignDialogVisible" title="指派处理人" width="520px">
+    <el-dialog
+      v-model="assignDialogVisible"
+      title="指派处理人"
+      width="520px"
+      :close-on-click-modal="false"
+    >
       <div class="assign-target" v-if="assignTarget">
         <span class="assign-target-label">告警</span>
         <strong :title="assignTarget.title">{{ assignTarget.title }}</strong>
@@ -759,7 +802,13 @@ export default { name: 'Incident' }
         >
           <el-option v-for="name in analystOptions" :key="name" :label="name" :value="name" />
         </el-select>
-        <el-button type="primary" size="small" :disabled="!assignNewHandler.length" @click="addHandler">添加处理人</el-button>
+        <el-button
+          type="primary"
+          size="small"
+          :loading="assignSubmitting"
+          :disabled="!assignNewHandler.length"
+          @click="addHandler"
+        >添加处理人</el-button>
       </div>
       <template #footer>
         <el-button @click="assignDialogVisible = false">关闭</el-button>
@@ -804,58 +853,6 @@ export default { name: 'Incident' }
       </template>
     </el-dialog>
 
-    <el-dialog v-model="ocrDialogVisible" title="从截图识别字段 · 请核对" width="640px">
-      <p class="ocr-hint">
-        以下字段由 OCR 从告警截图自动识别（引擎：{{ ocrEngine || '本地' }}），<strong>仅供预填、可能有误</strong>。
-        请逐项核对、修改后勾选写入「告警详情」；OCR 负责省录入，准确性以你的核对为准。
-      </p>
-      <div v-if="ocrFields.length" class="ocr-field-list">
-        <div v-for="(row, idx) in ocrFields" :key="row.key" class="ocr-field-row">
-          <el-checkbox v-model="row.checked" class="ocr-field-check" />
-          <span class="ocr-field-label">{{ row.label }}</span>
-          <el-input v-model="row.value" size="small" class="ocr-field-input" />
-          <el-tooltip content="移除此字段" placement="top">
-            <button type="button" class="ocr-field-remove" @click="ocrFields.splice(idx, 1)">
-              <el-icon><Close /></el-icon>
-            </button>
-          </el-tooltip>
-        </div>
-      </div>
-      <div v-else class="ocr-empty">未自动识别出字段。可在下方原文中选中文本，指定字段后手动添加。</div>
-
-      <div class="ocr-add">
-        <div class="ocr-add-title">手动补充字段<small>（从下拉选择已知字段，或直接输入自定义字段名；原文选中文本自动带入值）</small></div>
-        <div class="ocr-add-row">
-          <el-select
-            v-model="ocrAddName"
-            size="small"
-            class="ocr-add-key"
-            placeholder="选择或输入字段名"
-            filterable
-            allow-create
-            default-first-option
-            clearable
-          >
-            <el-option v-for="opt in ocrFieldOptions" :key="opt.key" :label="opt.label" :value="opt.key" />
-          </el-select>
-          <el-input v-model="ocrAddValue" size="small" class="ocr-add-value" placeholder="值（可在下方原文选中自动带入）" />
-          <el-button size="small" type="primary" :disabled="!String(ocrAddName || '').trim() || !ocrAddValue.trim()" @click="addOcrCustomField">添加</el-button>
-        </div>
-      </div>
-
-      <div v-if="ocrText" class="ocr-raw">
-        <div class="ocr-raw-label">OCR 识别原文<small>（选中文本即自动带入上方“值”）</small></div>
-        <pre class="ocr-raw-text" @mouseup="captureRawSelection">{{ ocrText }}</pre>
-      </div>
-
-      <template #footer>
-        <el-button @click="ocrDialogVisible = false">取消</el-button>
-        <el-button type="primary" :disabled="!ocrSelectedCount" @click="applyOcrFields">
-          写入告警详情{{ ocrSelectedCount ? `（${ocrSelectedCount}）` : '' }}
-        </el-button>
-      </template>
-    </el-dialog>
-
   </div>
 </template>
 
@@ -870,6 +867,7 @@ import {
   createIncidentAlert,
   deleteIncidentAlert,
   deleteIncidentAttachment,
+  downloadIncidentAttachment,
   deleteIncidentEntity,
   exportIncidentAlertMarkdown,
   exportIncidentOperationsCsv,
@@ -882,8 +880,6 @@ import {
   listIncidentAlerts,
   setIncidentAlertConclusion,
   setIncidentAlertStatus,
-  assignIncidentHandler,
-  removeIncidentHandler,
   setIncidentHandlers,
   rejectIncidentAlert,
   reopenIncidentAlert,
@@ -892,11 +888,11 @@ import {
   updateIncidentSubtask,
   deleteIncidentSubtask,
   updateIncidentAlert,
-  uploadIncidentAttachment,
-  ocrIncidentAlert,
-  extractIncidentFields
+  uploadIncidentAttachment
 } from '../api'
 import { auth } from '../store/auth'
+import { consumeSessionResume } from '../utils/sessionResume'
+import { shouldIgnoreRowClick } from '../utils/tableInteraction'
 
 // 按权限显隐/禁用操作入口（后端仍是强制校验，前端仅做体验）
 const hasPerm = (perm) => auth.hasPerm(perm)
@@ -980,6 +976,7 @@ const reopenForm = ref({ conclusion: '', reason: '' })
 const assignDialogVisible = ref(false)
 const assignTarget = ref(null)
 const assignNewHandler = ref([])
+const assignSubmitting = ref(false)
 const handlersModel = ref([])
 const createFiles = ref([])
 const createScreenshotSlots = ref([])
@@ -999,6 +996,83 @@ const templates = ref({
     fields: []
   }
 })
+
+const resumableFilterKeys = [
+  'keyword', 'status', 'severity', 'source_category', 'reporter', 'owner', 'queue'
+]
+
+function captureSessionResume(event) {
+  const setViewState = event?.detail?.setViewState
+  if (typeof setViewState !== 'function') return
+
+  const savedFilters = {}
+  for (const key of resumableFilterKeys) {
+    savedFilters[key] = String(filters.value[key] || '').slice(0, 500)
+  }
+
+  setViewState.call(event.detail, {
+    kind: 'incident',
+    filters: savedFilters,
+    operationDays: operationDays.value,
+    activeTab: activeTab.value,
+    selectedAlertId: selectedAlert.value?.id || '',
+    detailOpen: detailDialogVisible.value,
+    researchCollapsed: researchCollapsed.value,
+    researchInputs: {
+      key_evidence: String(researchInputs.value.key_evidence || '').slice(0, 20000),
+      handling_suggestion: String(researchInputs.value.handling_suggestion || '').slice(0, 20000),
+    },
+    queueScrollTop: opsScrollEl?.scrollTop || 0,
+    detailScrollTop: detailScrollEl?.scrollTop || 0,
+  })
+}
+
+async function restoreSessionResume() {
+  const resume = consumeSessionResume(auth.username)
+  const state = resume?.viewState
+  if (!state || state.kind !== 'incident') return false
+
+  if (state.filters && typeof state.filters === 'object') {
+    for (const key of resumableFilterKeys) {
+      if (typeof state.filters[key] === 'string') filters.value[key] = state.filters[key]
+    }
+  }
+  filters.value.current_user = currentUser
+
+  const restoredDays = Number(state.operationDays)
+  if (Number.isFinite(restoredDays) && restoredDays >= 1 && restoredDays <= 365) {
+    operationDays.value = restoredDays
+  }
+  if (['assignments', 'audit'].includes(state.activeTab)) activeTab.value = state.activeTab
+  if (typeof state.researchCollapsed === 'boolean') {
+    researchCollapsed.value = state.researchCollapsed
+  }
+
+  await refreshAll()
+
+  if (state.detailOpen && typeof state.selectedAlertId === 'string' && state.selectedAlertId) {
+    await selectAlert({ id: state.selectedAlertId })
+    if (state.researchInputs && typeof state.researchInputs === 'object') {
+      researchInputs.value = {
+        key_evidence: String(state.researchInputs.key_evidence || '').slice(0, 20000),
+        handling_suggestion: String(state.researchInputs.handling_suggestion || '').slice(0, 20000),
+      }
+    }
+  }
+
+  await nextTick()
+  bindQueueScroll()
+  if (opsScrollEl && Number.isFinite(Number(state.queueScrollTop))) {
+    opsScrollEl.scrollTop = Math.max(0, Number(state.queueScrollTop))
+  }
+  if (state.detailOpen) {
+    bindDetailScroll()
+    if (detailScrollEl && Number.isFinite(Number(state.detailScrollTop))) {
+      detailScrollEl.scrollTop = Math.max(0, Number(state.detailScrollTop))
+    }
+  }
+  return true
+}
 
 const fieldLabels = {
   source_ip: '源 IP',
@@ -1172,110 +1246,6 @@ function unbindDetailScroll() {
   headerShrunk.value = false
 }
 
-// —— 从截图 OCR 识别字段 → 研判员核对 → 写入告警详情 ——
-const ocrLoading = ref(false)
-const ocrDialogVisible = ref(false)
-const ocrFields = ref([])       // [{ key, label, value, checked }]
-const ocrText = ref('')
-const ocrEngine = ref('')
-const ocrAddName = ref('')
-const ocrAddValue = ref('')
-const ocrSelectedCount = computed(
-  () => ocrFields.value.filter(f => f.checked && String(f.value).trim()).length
-)
-
-// 下拉可选的已知字段（排除已在列表中的）；下拉可搜索，也可 allow-create 直接输入自定义名
-const ocrFieldOptions = computed(() => {
-  const used = new Set(ocrFields.value.map(f => f.key))
-  return Object.keys(fieldLabels)
-    .filter(k => !used.has(k))
-    .map(k => ({ key: k, label: fieldLabels[k] }))
-})
-
-// 在原文里选中文本 → 自动带入“值”输入框
-function captureRawSelection() {
-  const s = ((window.getSelection && window.getSelection().toString()) || '').trim()
-  if (s) ocrAddValue.value = s
-}
-
-// 从原文手动补充一个字段到写入列表。字段名可自定义：
-// 若与已知字段（键或中文标签）一致则归一到规范键，否则作为自定义字段名原样保留。
-function addOcrCustomField() {
-  const name = ocrAddName.value.trim()
-  const value = ocrAddValue.value.trim()
-  if (!name || !value) return
-  const known = Object.keys(fieldLabels).find(k => k === name || fieldLabels[k] === name)
-  const key = known || name
-  const label = known ? fieldLabels[known] : name
-  const existing = ocrFields.value.find(f => f.key === key)
-  if (existing) {
-    existing.value = value
-    existing.checked = true
-  } else {
-    ocrFields.value.push({ key, label, value, checked: true, custom: !known })
-  }
-  ocrAddName.value = ''
-  ocrAddValue.value = ''
-  ElMessage.success(`已添加「${label}」，确认后一并写入`)
-}
-
-async function runOcr() {
-  if (!selectedAlert.value || ocrLoading.value) return
-  ocrLoading.value = true
-  try {
-    const res = await ocrIncidentAlert(selectedAlert.value.id)
-    const fields = res?.data?.fields || {}
-    ocrEngine.value = res?.data?.engine || ''
-    ocrText.value = res?.data?.text || ''
-    const nf = selectedAlert.value.normalized_fields || {}
-    ocrFields.value = Object.keys(fields)
-      .filter(k => String(fields[k] ?? '').trim())
-      .map(k => ({
-        key: k,
-        label: fieldLabels[k] || k,
-        value: String(fields[k]),
-        // 默认只勾选“当前为空”的字段，不覆盖研判员已有的值
-        checked: !String(nf[k] ?? '').trim()
-      }))
-    ocrAddName.value = ''
-    ocrAddValue.value = ''
-    ocrDialogVisible.value = true
-    if (!ocrFields.value.length) ElMessage.info('未从截图中识别出结构化字段，可从识别原文手动补充')
-  } catch (e) {
-    // 引擎未安装等错误会带安装指引，用较长时间展示
-    ElMessageBox.alert(e.message || 'OCR 识别失败', '截图识别', { type: 'warning' })
-  } finally {
-    ocrLoading.value = false
-  }
-}
-
-async function applyOcrFields() {
-  if (!selectedAlert.value) return
-  const payload = {}
-  const custom = {}
-  let count = 0
-  for (const f of ocrFields.value) {
-    if (!(f.checked && String(f.value).trim())) continue
-    const v = String(f.value).trim()
-    if (f.custom) custom[f.key] = v      // 自定义字段名 → 走 custom_fields 补丁
-    else payload[f.key] = v              // 已知字段 → 直填
-    count += 1
-  }
-  if (Object.keys(custom).length) payload.custom_fields = custom
-  if (!count) {
-    ElMessage.warning('请至少勾选一个非空字段')
-    return
-  }
-  try {
-    const res = await updateIncidentAlert(selectedAlert.value.id, payload)
-    if (res?.success && res.data) selectedAlert.value = res.data
-    else await refreshSelectedAlert()
-    ocrDialogVisible.value = false
-    ElMessage.success(`已写入 ${count} 个字段到告警详情`)
-  } catch (e) {
-    ElMessage.error(e.message || '写入失败')
-  }
-}
 // 处置子任务卡片按需显示：应急响应中 / 事件类结论 / 已有子任务；误报等无需处置时不显示（可选）
 const showSubtasks = computed(() => {
   const s = selectedAlert.value
@@ -1506,45 +1476,6 @@ function removeOptionalField(key) {
   createForm.value[key] = ''
 }
 
-// —— 从粘贴文本识别字段并回填创建表单（非破坏性：仅填空、自动显示对应字段） ——
-const textExtracting = ref(false)
-
-function applyParsedFieldsToForm(fields, { silent = false } = {}) {
-  const f = createForm.value
-  const filled = []
-  for (const [key, value] of Object.entries(fields || {})) {
-    const v = String(value ?? '').trim()
-    if (!v || !(key in f) || String(f[key] ?? '').trim()) continue  // 空值 / 无此字段 / 已填 → 跳过
-    f[key] = v
-    if (!fixedFieldKeys.has(key)) addOptionalField(key)  // 非固定字段自动加入可见区
-    filled.push(fieldLabels[key] || key)
-  }
-  if (filled.length) ElMessage.success(`已识别并填充 ${filled.length} 个字段：${filled.join('、')}（请核对）`)
-  else if (!silent) ElMessage.info('未从文本中识别出可填充字段')
-  return filled.length
-}
-
-async function extractFieldsFromDetail() {
-  const text = String(createForm.value.description || '').trim()
-  if (!text) { ElMessage.info('请先在「告警详情」中粘贴或输入告警文本'); return }
-  textExtracting.value = true
-  try {
-    const res = await extractIncidentFields(text)
-    applyParsedFieldsToForm(res?.data?.fields || {})
-  } catch (e) {
-    ElMessage.error(e.message || '识别失败')
-  } finally {
-    textExtracting.value = false
-  }
-}
-
-async function autoExtractFromPastedText(text) {
-  try {
-    const res = await extractIncidentFields(text)
-    applyParsedFieldsToForm(res?.data?.fields || {}, { silent: true })
-  } catch (_) { /* 静默失败，用户仍可点「从文本识别字段」重试 */ }
-}
-
 function newScreenshotSlot() {
   return {
     id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
@@ -1597,9 +1528,6 @@ function handleDetailPaste(event) {
     ElMessage.success('剪贴板图片已添加为告警截图')
     return
   }
-  // 纯文本粘贴：文本照常进入输入框（不拦截），同时自动识别其中的字段并回填
-  const text = event.clipboardData?.getData('text') || ''
-  if (text.trim().length >= 6) autoExtractFromPastedText(text)
 }
 
 function handleScreenshotPaste(event, id) {
@@ -1754,6 +1682,11 @@ async function selectAlert(row) {
   }
 }
 
+function handleAlertRowClick(row, _column, event) {
+  if (shouldIgnoreRowClick(event)) return
+  selectAlert(row)
+}
+
 async function openAdjacentAlert(offset) {
   const target = alerts.value[selectedAlertIndex.value + offset]
   if (target) await selectAlert(target)
@@ -1805,6 +1738,18 @@ async function openEditAlert(alertOrId) {
 function addCreateFiles(fileList) {
   const files = Array.from(fileList || [])
   if (files.length) createFiles.value = [...createFiles.value, ...files]
+}
+
+function removeCreateFile(index) {
+  createFiles.value = createFiles.value.filter((_, fileIndex) => fileIndex !== index)
+}
+
+function formatFileSize(size) {
+  const bytes = Number(size) || 0
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`
 }
 
 function handleCreateAttachmentPick(e) {
@@ -2265,42 +2210,54 @@ function openAssignDialog(alert) {
   assignDialogVisible.value = true
 }
 
-async function refreshAssignTarget() {
-  if (!assignTarget.value) return
-  const res = await getIncidentAlert(assignTarget.value.id)
-  if (res.success) {
+async function addHandler() {
+  if (!assignTarget.value || !assignNewHandler.value.length || assignSubmitting.value) return
+  const selected = assignNewHandler.value
+    .map(name => String(name || '').trim())
+    .filter(Boolean)
+  const merged = Array.from(new Set([...(assignTarget.value.handlers || []), ...selected]))
+  assignSubmitting.value = true
+  try {
+    const res = await setIncidentHandlers(assignTarget.value.id, merged)
+    if (!res.success) throw new Error(res.error || '指派失败')
+
     assignTarget.value = res.data
     if (selectedAlert.value?.id === res.data.id) {
       selectedAlert.value = res.data
       handlersModel.value = [...(res.data.handlers || [])]
       flowForm.value.status = res.data.status || ''
       flowForm.value.conclusion = res.data.conclusion || ''
-      blankResearchInputs()
     }
-  }
-  await loadAlerts()
-}
-
-async function addHandler() {
-  if (!assignTarget.value || !assignNewHandler.value.length) return
-  const merged = Array.from(new Set([...(assignTarget.value.handlers || []), ...assignNewHandler.value]))
-  const res = await setIncidentHandlers(assignTarget.value.id, merged)
-  if (res.success) {
     ElMessage.success('处理人已更新')
     assignNewHandler.value = []
-    await refreshAssignTarget()
-  } else {
-    ElMessage.error(res.error || '指派失败')
+    await Promise.all([loadAlerts(), loadStats()])
+  } catch (e) {
+    ElMessage.error(e.message || '指派失败')
+  } finally {
+    assignSubmitting.value = false
   }
 }
 
 async function removeHandlerFn(name) {
-  if (!assignTarget.value) return
+  if (!assignTarget.value || assignSubmitting.value) return
   const remaining = (assignTarget.value.handlers || []).filter(h => h !== name)
-  const res = await setIncidentHandlers(assignTarget.value.id, remaining)
-  if (res.success) {
+  assignSubmitting.value = true
+  try {
+    const res = await setIncidentHandlers(assignTarget.value.id, remaining)
+    if (!res.success) throw new Error(res.error || '移除处理人失败')
+    assignTarget.value = res.data
+    if (selectedAlert.value?.id === res.data.id) {
+      selectedAlert.value = res.data
+      handlersModel.value = [...(res.data.handlers || [])]
+      flowForm.value.status = res.data.status || ''
+      flowForm.value.conclusion = res.data.conclusion || ''
+    }
     ElMessage.success(`已移除处理人：${name}`)
-    await refreshAssignTarget()
+    await Promise.all([loadAlerts(), loadStats()])
+  } catch (e) {
+    ElMessage.error(e.message || '移除处理人失败')
+  } finally {
+    assignSubmitting.value = false
   }
 }
 
@@ -2507,8 +2464,29 @@ async function removeAttachment(att) {
   }
 }
 
-function openAttachment(att) {
-  if (att?.url) window.open(att.url, '_blank', 'noopener')
+async function copyAlertNo(value) {
+  if (!value) return
+  try {
+    await navigator.clipboard.writeText(value)
+  } catch (_) {
+    const input = document.createElement('textarea')
+    input.value = value
+    input.style.position = 'fixed'
+    input.style.opacity = '0'
+    document.body.appendChild(input)
+    input.select()
+    document.execCommand('copy')
+    input.remove()
+  }
+  ElMessage.success(`已复制告警编号：${value}`)
+}
+
+async function openAttachment(att) {
+  try {
+    await downloadIncidentAttachment(att)
+  } catch (err) {
+    ElMessage.error(err.message || '附件下载失败')
+  }
 }
 
 async function handleEvidencePaste(event) {
@@ -2627,12 +2605,15 @@ watch(alerts, () => {
   nextTick(bindQueueScroll)
 })
 
-onMounted(() => {
-  refreshAll()
+onMounted(async () => {
+  window.addEventListener('capture-session-resume', captureSessionResume)
+  const restored = await restoreSessionResume()
+  if (!restored) await refreshAll()
   nextTick(bindQueueScroll)
 })
 
 onBeforeUnmount(() => {
+  window.removeEventListener('capture-session-resume', captureSessionResume)
   if (opsScrollEl) opsScrollEl.removeEventListener('scroll', handleQueueScroll)
 })
 </script>
@@ -2678,14 +2659,17 @@ onBeforeUnmount(() => {
 .queue-tabs strong { font-size: 11px; color: inherit; }
 .panel-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; flex: 1 1 auto; min-width: 0; }
 .panel-actions > .el-select { width: 130px; }
-.filter-keyword { width: 230px; }
+.filter-keyword { width: 310px; }
 .filter-person { width: 110px; }
 .batch-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 12px; border-bottom: 1px solid #E8EDF3; background: #FAFBFD; }
 .batch-toolbar > span { color: #5A6069; font-size: 12px; font-weight: 700; margin-right: 4px; }
 .batch-owner { width: 130px; }
 .batch-select { width: 120px; }
 .alert-table { flex: 1; min-height: 0; }
-.alert-title-cell { display: flex; align-items: center; gap: 8px; font-weight: 600; color: #1B1D21; }
+.alert-no { border: 0; padding: 0; background: transparent; color: #006DE0; font-family: Consolas, "SFMono-Regular", monospace; font-size: 12px; cursor: copy; white-space: nowrap; }
+.alert-no:hover { color: #004EAA; text-decoration: underline; }
+.alert-title-cell { display: flex; align-items: center; min-width: 0; gap: 8px; font-weight: 600; color: #1B1D21; }
+.alert-title-cell > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .muted-line { color: #7A8391; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .severity-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; background: #D6A000; }
 .severity-dot--critical { background: #8B0000; }
@@ -2700,7 +2684,10 @@ onBeforeUnmount(() => {
 .detail-navigation { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .detail-dialog-body { width: min(1440px, 100%); min-height: 0; margin: 0 auto; padding: 0 20px 24px; }
 .detail-header { padding: 14px 16px; border-bottom: 1px solid #E8EDF3; display: flex; justify-content: space-between; gap: 12px; }
-.detail-title { display: flex; align-items: center; gap: 8px; font-size: 16px; font-weight: 700; color: #1B1D21; }
+.detail-header > div:first-child { flex: 1; min-width: 0; }
+.detail-title { display: flex; align-items: center; min-width: 0; gap: 8px; font-size: 16px; font-weight: 700; color: #1B1D21; }
+.detail-title > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.detail-alert-no { flex-shrink: 0; font-size: 13px; }
 .detail-meta { margin-top: 5px; font-size: 12px; color: #69707D; }
 .detail-actions { display: flex; gap: 8px; align-items: flex-start; }
 .severity-badge { display: inline-flex; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 700; color: #fff; background: #D6A000; text-transform: uppercase; }
@@ -2732,12 +2719,13 @@ onBeforeUnmount(() => {
 .evidence-uploader > span { color: #69707D; font-size: 12px; }
 .evidence-gallery { display: flex; flex-direction: column; gap: 12px; }
 .evidence-gallery { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-start; }
-.evidence-shot { max-width: 100%; border: 1px solid #E8EDF3; border-radius: 6px; overflow: hidden; background: #fff; }
+.evidence-shot { position: relative; max-width: 100%; border: 1px solid #E8EDF3; border-radius: 6px; overflow: hidden; background: #fff; }
 .evidence-shot .el-image { display: block; max-width: 100%; cursor: zoom-in; }
 .evidence-shot :deep(.el-image__inner) { display: block; width: auto; height: auto; max-width: 100%; max-height: 560px; object-fit: contain; }
-.evidence-shot-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 10px; background: #fff; border-top: 1px solid #E8EDF3; }
-.evidence-shot-bar > span { font-size: 12px; color: #5A6069; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.evidence-shot-bar .attachment-delete { position: static; background: transparent; color: #C0392B; padding: 2px; }
+.attachment-delete.evidence-shot-delete { top: 8px; right: 8px; color: #fff; background: rgba(20, 28, 38, .68); border-radius: 4px; padding: 5px; opacity: .78; transition: opacity .15s ease, background .15s ease; }
+.evidence-shot:hover .evidence-shot-delete,
+.evidence-shot-delete:focus-visible { opacity: 1; }
+.attachment-delete.evidence-shot-delete:hover { background: rgba(192, 57, 43, .9); }
 .evidence-panel { transition: border-color .15s, background .15s, box-shadow .15s; }
 .evidence-panel.is-dragging { border-color: #006DE0; background: #F2F8FE; box-shadow: inset 0 0 0 2px #CFE4FB; }
 .evidence-drop-hint { margin-bottom: 12px; padding: 6px 10px; border-radius: 6px; background: #E8F1FC; color: #006DE0; font-size: 12px; text-align: center; }
@@ -2750,6 +2738,9 @@ onBeforeUnmount(() => {
 .evidence-file-chip { position: relative; display: flex; align-items: center; gap: 6px; padding: 6px 28px 6px 10px; border: 1px solid #E8EDF3; border-radius: 6px; background: #fff; font-size: 12px; color: #1B1D21; max-width: 240px; cursor: pointer; transition: border-color .15s, background .15s; }
 .evidence-file-chip:hover { border-color: #006DE0; background: #F2F8FE; color: #006DE0; }
 .evidence-file-chip:hover small { color: #006DE0; }
+.evidence-file-chip.is-missing { border-color: #E6B9B6; background: #FFF7F6; color: #A33A32; cursor: not-allowed; }
+.evidence-file-chip.is-missing:hover { border-color: #D9908A; background: #FFF1F0; color: #A33A32; }
+.evidence-file-chip.is-missing small { color: #A33A32; }
 .evidence-file-chip > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .evidence-file-chip small { color: #8B92A0; flex-shrink: 0; }
 .evidence-file-chip .attachment-delete { position: absolute; top: 50%; right: 4px; transform: translateY(-50%); background: transparent; color: #C0392B; padding: 2px; }
@@ -2790,26 +2781,6 @@ onBeforeUnmount(() => {
 .reopen-hint { margin: 0 0 12px; padding: 10px 12px; background: #FEF0F0; border: 1px solid #FBC4C4; border-radius: 6px; color: #A23A3A; font-size: 13px; line-height: 1.6; }
 .reopen-field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
 .reopen-field > span { color: #69707D; font-size: 12px; }
-.detail-extract-bar { display: flex; align-items: center; gap: 10px; margin-top: 8px; flex-wrap: wrap; }
-.detail-extract-hint { color: #8B92A0; font-size: 12px; line-height: 1.5; }
-.ocr-hint { margin: 0 0 12px; padding: 10px 12px; background: #F2F8FE; border: 1px solid #CFE4FB; border-radius: 6px; color: #2C5A8C; font-size: 13px; line-height: 1.6; }
-.ocr-field-list { display: flex; flex-direction: column; gap: 8px; }
-.ocr-field-row { display: flex; align-items: center; gap: 10px; }
-.ocr-field-check { flex-shrink: 0; }
-.ocr-field-label { flex-shrink: 0; width: 84px; color: #5A6069; font-size: 13px; }
-.ocr-field-input { flex: 1; min-width: 0; }
-.ocr-field-remove { flex-shrink: 0; border: none; background: transparent; color: #C0392B; cursor: pointer; padding: 2px; display: inline-flex; align-items: center; }
-.ocr-empty { padding: 16px; text-align: center; color: #8B92A0; font-size: 13px; background: #FAFBFD; border: 1px dashed #E8EDF3; border-radius: 6px; }
-.ocr-add { margin-top: 14px; padding-top: 12px; border-top: 1px dashed #E8EDF3; }
-.ocr-add-title { font-size: 13px; color: #5A6069; margin-bottom: 8px; }
-.ocr-add-title small { color: #A0A6B0; font-weight: normal; }
-.ocr-add-row { display: flex; align-items: center; gap: 8px; }
-.ocr-add-key { width: 130px; flex-shrink: 0; }
-.ocr-add-value { flex: 1; min-width: 0; }
-.ocr-raw { margin-top: 14px; }
-.ocr-raw-label { font-size: 12px; color: #8B92A0; margin-bottom: 6px; }
-.ocr-raw-label small { color: #A0A6B0; }
-.ocr-raw-text { margin: 0; max-height: 220px; overflow: auto; white-space: pre-wrap; word-break: break-all; font-family: 'JetBrains Mono', Consolas, monospace; font-size: 12px; line-height: 1.6; color: #1B1D21; background: #FAFBFD; border-radius: 4px; padding: 8px; user-select: text; }
 .need-flag { font-style: normal; font-size: 11px; font-weight: 600; color: #C0651A; background: #FDF6EC; border: 1px solid #F5DAB1; border-radius: 4px; padding: 0 5px; margin-left: 4px; }
 .recorded-flag { font-style: normal; font-size: 11px; font-weight: 600; color: #5B9A6B; background: #EEF7F0; border: 1px solid #CDE8D5; border-radius: 4px; padding: 0 5px; margin-left: 4px; }
 .research-fill-head { display: flex; align-items: center; gap: 8px; margin: 6px 0 8px; }
@@ -2928,9 +2899,16 @@ onBeforeUnmount(() => {
 .remove-field-button { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; border: 0; border-radius: 4px; background: transparent; color: #8B92A0; cursor: pointer; }
 .remove-field-button:hover { background: #FDECEB; color: #BD271E; }
 
-.create-attachments { width: 100%; border: 2px dashed #D3DAE6; border-radius: 6px; padding: 18px; display: flex; align-items: center; justify-content: center; gap: 8px; color: #69707D; cursor: pointer; background: #FAFBFD; outline: none; transition: border-color .15s, background .15s, color .15s; }
+.create-attachment-field { display: flex; flex-direction: column; gap: 10px; width: 100%; }
+.create-attachments { width: 100%; box-sizing: border-box; border: 2px dashed #D3DAE6; border-radius: 6px; padding: 18px; display: flex; align-items: center; justify-content: center; gap: 8px; color: #69707D; cursor: pointer; background: #FAFBFD; outline: none; transition: border-color .15s, background .15s, color .15s; }
 .create-attachments:hover, .create-attachments:focus { border-color: #006DE0; background: #F0F6FC; color: #006DE0; }
 .create-attachments:hover { border-color: #006DE0; color: #006DE0; }
+.create-file-list { display: flex; flex-direction: column; gap: 6px; width: 100%; }
+.create-file-item { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 8px 10px; border: 1px solid #E1E6ED; border-radius: 6px; background: #FAFBFD; color: #445064; }
+.create-file-item > .el-icon { flex-shrink: 0; color: #69707D; }
+.create-file-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.create-file-item > small { flex-shrink: 0; color: #8B92A0; font-size: 11px; }
+.create-file-remove { flex-shrink: 0; color: #C0392B; }
 .preview-image { max-width: 82vw; max-height: 76vh; display: block; }
 :global(.optional-field-menu .el-dropdown-menu__item) { display: flex; justify-content: space-between; gap: 24px; min-width: 230px; }
 :global(.optional-field-menu .el-dropdown-menu__item small) { color: #8B92A0; font-size: 11px; }

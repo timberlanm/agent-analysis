@@ -1,4 +1,6 @@
 """RBAC 回归套件：登录门控 / 对象级越权 / 读范围 / 服务令牌 / 审计 / 无锁定 / 可配置权限。"""
+import io
+import re
 import sqlite3
 
 import backend.services.incident_service as isvc
@@ -9,6 +11,14 @@ def _new_alert(client, title="告警", cat="edr"):
     r = client.post("/api/incident/alerts", json={"title": title, "source_category": cat})
     assert r.status_code == 200, r.get_json()
     return r.get_json()["data"]["id"]
+
+
+def test_health_reports_database_mode(rbac):
+    response = rbac.anon().get("/health")
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["status"] == "healthy"
+    assert payload["database"] == {"mode": "sqlite", "connected": True}
 
 
 # ============ Phase 0：登录与权限门控 ============
@@ -40,6 +50,95 @@ def test_login_and_basic_gating(rbac):
     assert ana.get("/api/incident/alerts").status_code == 401
 
 
+def test_removed_field_recognition_endpoints_are_unavailable(rbac):
+    rbac.create_user("ana", ["analyst"])
+    analyst = rbac.login("ana")
+    permissions = analyst.get("/api/auth/me").get_json()["data"]["permissions"]
+    assert "ocr.run" not in permissions
+    assert analyst.get("/api/incident/ocr/status").status_code == 404
+    assert analyst.post("/api/incident/extract-fields", json={"text": "src_ip=10.0.0.1"}).status_code == 404
+    assert analyst.post("/api/incident/alerts/missing/ocr").status_code == 404
+
+
+def test_removed_recognition_permission_is_cleaned_on_upgrade(rbac):
+    with isvc._conn() as conn:
+        conn.execute(
+            "INSERT INTO permissions (code, name, category) VALUES ('ocr.run', 'OCR/字段抽取', '告警')"
+        )
+        conn.execute(
+            "INSERT INTO role_permissions (role_code, permission_code) VALUES ('analyst', 'ocr.run')"
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO auth_meta (key, value) VALUES ('permission_policy_version', '3')"
+        )
+
+    auth_service.init_auth()
+
+    with isvc._conn() as conn:
+        assert conn.execute("SELECT 1 FROM permissions WHERE code = 'ocr.run'").fetchone() is None
+        assert conn.execute(
+            "SELECT 1 FROM role_permissions WHERE permission_code = 'ocr.run'"
+        ).fetchone() is None
+
+
+def test_alert_number_is_unique_and_searchable(rbac):
+    rbac.create_user("root", ["admin"])
+    root = rbac.login("root")
+    first_id = _new_alert(root, "第一条长标题告警")
+    second_id = _new_alert(root, "第二条长标题告警")
+
+    first = root.get(f"/api/incident/alerts/{first_id}").get_json()["data"]
+    second = root.get(f"/api/incident/alerts/{second_id}").get_json()["data"]
+    assert re.fullmatch(r"SOC-\d{8}-\d{6,}", first["alert_no"])
+    assert re.fullmatch(r"SOC-\d{8}-\d{6,}", second["alert_no"])
+    assert first["alert_no"] != second["alert_no"]
+
+    exact = root.get(
+        f"/api/incident/alerts?keyword={first['alert_no']}"
+    ).get_json()["data"]["alerts"]
+    assert [item["id"] for item in exact] == [first_id]
+
+    suffix = first["alert_no"].rsplit("-", 1)[-1]
+    partial = root.get(
+        f"/api/incident/alerts?keyword={suffix}"
+    ).get_json()["data"]["alerts"]
+    assert first_id in {item["id"] for item in partial}
+
+
+def test_assigned_responder_can_download_attachment(rbac):
+    rbac.create_user("root", ["admin"])
+    rbac.create_user("resp", ["responder"])
+    rbac.create_user("other", ["responder"])
+    root, resp, other = (
+        rbac.login("root"),
+        rbac.login("resp"),
+        rbac.login("other"),
+    )
+    alert_id = _new_alert(root, "附件下载验证")
+    upload = root.post(
+        f"/api/incident/alerts/{alert_id}/attachments",
+        data={"file": (io.BytesIO(b"forensic evidence\n"), "evidence.txt")},
+        content_type="multipart/form-data",
+    )
+    assert upload.status_code == 200, upload.get_json()
+    attachment = upload.get_json()["data"]["attachments"][0]
+    assert attachment["file_available"] is True
+
+    assert root.put(
+        f"/api/incident/alerts/{alert_id}/handlers",
+        json={"names": ["resp"]},
+    ).status_code == 200
+    assert resp.get(attachment["url"]).data == b"forensic evidence\n"
+    assert other.get(attachment["url"]).status_code == 403
+
+    path = isvc.resolve_file_path(attachment["rel_path"])
+    assert path is not None
+    path.unlink()
+    missing = resp.get(attachment["url"])
+    assert missing.status_code == 404
+    assert missing.get_json()["error"] == "文件不存在"
+
+
 # ============ Phase 1：对象级越权收敛 ============
 
 def test_object_scope_writes(rbac):
@@ -68,11 +167,17 @@ def test_analyst_scope(rbac):
     assert aid in {x["id"] for x in a.get("/api/incident/alerts").get_json()["data"]["alerts"]}
     # 未领取前不能改（对象级收敛，非本人经手）
     assert b.put(f"/api/incident/alerts/{aid}", json={"title": "x"}).status_code == 403
-    # 自领（assign=self）后可研判/编辑
+    # 未分派告警可指派给有效账号；接手人随后可研判/编辑
+    assert a.put(f"/api/incident/alerts/{aid}/handlers", json={"names": ["anaB"]}).status_code == 200
+    assert b.put(f"/api/incident/alerts/{aid}", json={"title": "B 接手研判"}).status_code == 200
+    # 非当前处理人不能越权改派他人已经接手的告警
+    assert a.put(f"/api/incident/alerts/{aid}/handlers", json={"names": ["anaA"]}).status_code == 403
+    # 管理员清空处理人后，研判员可以自领并继续研判
+    assert root.put(f"/api/incident/alerts/{aid}/handlers", json={"names": []}).status_code == 200
     assert a.put(f"/api/incident/alerts/{aid}/handlers", json={"names": ["anaA"]}).status_code == 200
     assert a.put(f"/api/incident/alerts/{aid}", json={"title": "研判中"}).status_code == 200
     assert a.post(f"/api/incident/alerts/{aid}/conclusion", json={"conclusion": "business"}).status_code == 200
-    # 不能改派他人
+    # 不存在或停用的账号不能被指派
     assert a.put(f"/api/incident/alerts/{aid}/handlers", json={"names": ["other"]}).status_code == 403
 
 
@@ -265,7 +370,7 @@ def test_h1_dualrole_assignee_cannot_escalate(rbac):
     rbac.create_user("dual", ["responder", "analyst"])
     root, ana, dual = rbac.login("root"), rbac.login("ana"), rbac.login("dual")
 
-    # ana 创建告警；用 admin 把 dual 设为处理人（analyst 无权改派他人）
+    # ana 创建告警；用 admin 建立固定的双处理人测试前置状态
     aid = _new_alert(ana, "H1回归告警")
     assert root.put(f"/api/incident/alerts/{aid}/handlers", json={"names": ["ana", "dual"]}).status_code == 200
     # ana 创建子任务，指派给 dual（dual 成为该子任务执行人）

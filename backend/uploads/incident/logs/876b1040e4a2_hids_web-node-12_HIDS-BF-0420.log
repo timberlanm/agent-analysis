@@ -1,0 +1,23 @@
+==============================================================================
+ 青藤云 HIDS  取证日志导出
+ 导出时间: 2026-06-19 01:46:46  时区: Asia/Shanghai (UTC+8)
+ 关联规则: HIDS-BF-0420  SSH 短时间高频失败后成功登录
+ ATT&CK: T1110 Brute Force
+==============================================================================
+
+2026-06-19 04:06:00  web-node-12  EventID=1 (ProcessCreate / Auth)
+  Computer: web-node-12
+  User: root
+  Image/Process: sshd
+  CommandLine: sshd: root@notty
+  ParentImage: -
+  Action: 登录成功（前置 1273 次失败）
+  Hashes: SHA256=-
+
+2026-06-19 04:06:00  web-node-12  EventID=3 (NetworkConnect)
+  SourceIp: 103.97.56.22  DestinationIp: 172.16.20.12:22
+  DestinationHostname: -
+
+VERDICT: UNDER_INVESTIGATION
+KeyEvidence: 1273 次失败后成功登录；源 IP 103.97.56.22 为境外；root 直接登录（违反基线）
+Handling: 立即重置 root 口令、禁用 root 远程登录、封禁源 IP，检查是否落地后门与持久化。

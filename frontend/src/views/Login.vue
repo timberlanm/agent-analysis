@@ -68,6 +68,7 @@ import { ElMessage } from 'element-plus'
 import { Warning, User, Lock, Key } from '@element-plus/icons-vue'
 import { auth } from '../store/auth'
 import { authChangePassword } from '../api'
+import { peekSessionResume, safeInternalPath } from '../utils/sessionResume'
 
 const route = useRoute()
 const router = useRouter()
@@ -79,8 +80,13 @@ const error = ref('')
 const mustChange = ref(auth.mustChangePassword)
 
 function proceed() {
+  const resume = peekSessionResume(auth.username)
+  if (resume) {
+    router.replace(resume.path)
+    return
+  }
   const redirect = route.query.redirect
-  router.replace(typeof redirect === 'string' && redirect ? redirect : '/incident')
+  router.replace(safeInternalPath(redirect))
 }
 
 async function onLogin() {

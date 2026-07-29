@@ -64,6 +64,8 @@ python backend/app.py --serve-frontend
 | `FLASK_HOST` | `0.0.0.0` | 监听地址；设为 `127.0.0.1` 则仅本机可访问 |
 | `FLASK_PORT` | `5000` | 端口；被占用时改这里 |
 | `FLASK_DEBUG` | `False` | 调试模式，生产保持 False |
+| `DATABASE_URL` | 空 | 设置后使用 PostgreSQL；当前开发环境由 `.env.postgres.local` 提供 |
+| `INCIDENT_UPLOAD_DIR` | `backend/uploads/incident` | 附件物理文件根目录；数据库只保存相对路径 |
 
 示例（改端口后启动）：
 
@@ -93,23 +95,17 @@ python backend\app.py --serve-frontend
 
 | 内容 | 路径 | 说明 |
 |------|------|------|
-| 业务数据库 | `backend/data/`（SQLite） | 首次运行自动创建 |
-| 上传附件 / 截图 | `backend/uploads/` | 告警截图、证据文件 |
+| 业务数据库 | PostgreSQL `soc_platform_dev` | 连接信息来自 `DATABASE_URL` |
+| 上传附件 / 截图 | `INCIDENT_UPLOAD_DIR` | 图片、日志和 PCAP；必须独立备份 |
+| SQLite 迁移源 | `backend/data/analysis_store.db` | 仅作为迁移备份和回退参考 |
 | 前端构建产物 | `frontend/dist/` | Flask 托管的静态页面 |
 
-> 备份/迁移数据：拷贝 `backend/data/` 与 `backend/uploads/` 即可。
+> 完整备份必须同时包含 PostgreSQL 和 `INCIDENT_UPLOAD_DIR`。只备份数据库
+> 无法恢复图片、日志和 PCAP 原文件。
 
 ---
 
-## 8. OCR 识别功能（可选）
-
-- 若已安装 `rapidocr-onnxruntime`（见 INSTALL.md 3.6），详情页可用「**从截图识别字段**」，上报页粘贴文本可「**从文本识别字段**」，自动提取 IP / 域名 / Hash / 命令行等预填「告警详情」，由研判员核对后写入。
-- **未安装时**：点击会提示安装指引，其余功能完全不受影响（优雅降级）。
-- 安装后需**重启后端**才生效。
-
----
-
-## 9. 故障排查
+## 8. 故障排查
 
 | 现象 | 排查方向 |
 |------|----------|
@@ -117,7 +113,6 @@ python backend\app.py --serve-frontend
 | 接口报错 / `HTTP 405` / `fetch failed` | 后端未启动或已崩溃 → 查看运行窗口日志，重启 `python backend\app.py --serve-frontend` |
 | 端口 5000 被占用 | 设 `FLASK_PORT` 换端口（第 4 节） |
 | 局域网访问不了 | 确认 `FLASK_HOST=0.0.0.0`；放行防火墙 5000 端口；用对本机 IP |
-| 「从截图/文本识别字段」不可用 | 未装 OCR 引擎 → 按 INSTALL.md 3.6 安装并重启后端 |
 | 改了后端代码不生效 | 服务不热重载，需手动重启进程 |
 
 ---

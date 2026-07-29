@@ -1,0 +1,23 @@
+==============================================================================
+ 奇安信 天擎 EDR  取证日志导出
+ 导出时间: 2026-06-19 01:46:44  时区: Asia/Shanghai (UTC+8)
+ 关联规则: EDR-CRED-1003  comsvcs.dll MiniDump LSASS 内存转储
+ ATT&CK: T1003.001 LSASS Memory
+==============================================================================
+
+2026-06-18 02:17:00  FIN-DB-03  EventID=1 (ProcessCreate / Auth)
+  Computer: FIN-DB-03
+  User: NT AUTHORITY\SYSTEM
+  Image/Process: C:\Windows\Temp\lsass.dmp
+  CommandLine: rundll32.exe C:\Windows\System32\comsvcs.dll, MiniDump 712 C:\Windows\Temp\lsass.dmp full
+  ParentImage: cmd.exe
+  Action: -
+  Hashes: SHA256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+
+2026-06-18 02:17:00  FIN-DB-03  EventID=3 (NetworkConnect)
+  SourceIp: 10.18.32.41  DestinationIp: 10.18.32.7:-
+  DestinationHostname: -
+
+VERDICT: UNDER_INVESTIGATION
+KeyEvidence: lsass.dmp 已落地；rundll32 命令行包含 comsvcs.dll MiniDump；进程链 cmd.exe -> rundll32.exe
+Handling: 立即隔离主机、保全内存转储样本、重置该主机及关联域账号口令，排查计划任务来源。

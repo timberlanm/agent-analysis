@@ -1,0 +1,19 @@
+==============================================================================
+ CrowdStrike Falcon  取证日志导出
+ 导出时间: 2026-06-19 01:46:45  时区: Asia/Shanghai (UTC+8)
+ 关联规则: EDR-PERSIST-1640  隐藏账号（$ 结尾）加入管理员组
+ ATT&CK: T1136.001 / T1098
+==============================================================================
+
+2026-06-18 01:53:00  FIN-DB-03  EventID=1 (ProcessCreate / Auth)
+  Computer: FIN-DB-03
+  User: NT AUTHORITY\SYSTEM
+  Image/Process: net.exe
+  CommandLine: net localgroup administrators sysbackup$ /add
+  ParentImage: cmd.exe
+  Action: -
+  Hashes: SHA256=-
+
+VERDICT: UNDER_INVESTIGATION
+KeyEvidence: 创建 $ 结尾隐藏账号 sysbackup$；加入 administrators 组；与 LSASS 转储同主机同时段
+Handling: 禁用并删除该账号，排查所有主机的隐藏账号，结合 LSASS 告警按失陷主机处置。

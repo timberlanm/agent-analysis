@@ -1,0 +1,23 @@
+==============================================================================
+ Microsoft Defender for Endpoint  取证日志导出
+ 导出时间: 2026-06-19 01:52:59  时区: Asia/Shanghai (UTC+8)
+ 关联规则: EDR-CRED-1010  非域控发起 DRSUAPI 复制（DCSync）
+ ATT&CK: T1003.006 DCSync
+==============================================================================
+
+2026-06-15 01:06:00  FIN-PC-22  EventID=1 (ProcessCreate / Auth)
+  Computer: FIN-PC-22
+  User: CORP\chen.jing
+  Image/Process: powershell.exe
+  CommandLine: powershell -c "Invoke-Mimikatz -Command 'lsadump::dcsync /domain:corp.local /user:krbtgt'"
+  ParentImage: mshta.exe
+  Action: -
+  Hashes: SHA256=-
+
+2026-06-15 01:06:00  FIN-PC-22  EventID=3 (NetworkConnect)
+  SourceIp: 10.22.4.22  DestinationIp: 10.10.0.2:-
+  DestinationHostname: -
+
+VERDICT: TRUE_POSITIVE
+KeyEvidence: 非域控主机发起 DRSUAPI 复制；目标 user krbtgt；源 FIN-PC-22 -> AD-DC-02
+Handling: 按域沦陷处置：两次重置 krbtgt、强制全域改密、排查黄金票据，隔离 FIN-PC-22。

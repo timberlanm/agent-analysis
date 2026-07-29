@@ -208,18 +208,38 @@ export async function uploadIncidentAttachment(alertId, file, description = '') 
   if (!resp.ok) throw new Error(data.error || '上传失败')
   return data
 }
+export async function downloadIncidentAttachment(attachment) {
+  if (!attachment?.url) throw new Error('附件下载地址不存在')
+  if (attachment.file_available === false) throw new Error('附件源文件缺失，请联系管理员恢复')
+
+  const url = attachment.url.startsWith('/api/')
+    ? `${API_BASE}${attachment.url}`
+    : attachment.url
+  const resp = await fetch(url, { credentials: 'include' })
+  if (resp.status === 401) notifyUnauthorized()
+  if (!resp.ok) {
+    let message = `下载失败 (HTTP ${resp.status})`
+    const bodyText = await resp.text()
+    try {
+      const body = JSON.parse(bodyText)
+      message = body.error || message
+    } catch (_) {
+      if (bodyText) message = bodyText
+    }
+    throw new Error(message)
+  }
+
+  const blob = await resp.blob()
+  const objectUrl = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = objectUrl
+  link.download = attachment.original_name || attachment.filename || 'attachment'
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  setTimeout(() => URL.revokeObjectURL(objectUrl), 1000)
+}
 export function deleteIncidentAttachment(id) { return request(`/incident/attachments/${id}`, { method: 'DELETE' }) }
-
-// 从截图 OCR 识别告警字段（识别可能较慢，放宽超时；仅返回候选，不写库）
-export function ocrIncidentAlert(id) {
-  return request(`/incident/alerts/${id}/ocr`, { method: 'POST', timeout: 120000 })
-}
-export function getIncidentOcrStatus() { return request('/incident/ocr/status') }
-
-// 从一段纯文本（粘贴的告警内容）解析候选字段。纯规则、无需 OCR 引擎
-export function extractIncidentFields(text) {
-  return request('/incident/extract-fields', { method: 'POST', body: JSON.stringify({ text }) })
-}
 
 // Legacy helpers kept for compatibility with older screens/scripts.
 export async function uploadIncidentImage(file) {

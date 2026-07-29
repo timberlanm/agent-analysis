@@ -38,7 +38,7 @@ BUILTIN_ROLES: List[Tuple[str, str, str]] = [
 ALL_PERMISSIONS = {
     "alert.view", "alert.create", "alert.edit", "alert.delete", "alert.conclude",
     "alert.status", "alert.assign", "alert.reject", "alert.reopen", "alert.note",
-    "alert.entity", "subtask.manage", "subtask.execute", "attachment.write", "ocr.run", "export",
+    "alert.entity", "subtask.manage", "subtask.execute", "attachment.write", "export",
     "audit.view", "system.manage", "data.clear",
 }
 
@@ -50,7 +50,6 @@ PERMISSION_CATALOG = [
     ("alert.delete", "删除告警", "告警"),
     ("alert.entity", "实体增删", "告警"),
     ("attachment.write", "附件上传/删除", "告警"),
-    ("ocr.run", "OCR/字段抽取", "告警"),
     ("alert.conclude", "研判定性", "研判"),
     ("alert.status", "状态流转", "研判"),
     ("alert.assign", "指派处理人", "研判"),
@@ -71,22 +70,22 @@ ROLE_PERMISSIONS: Dict[str, set] = {
     "analyst": {
         "alert.view", "alert.create", "alert.edit", "alert.conclude",
         "alert.status", "alert.assign", "alert.reject", "alert.reopen", "alert.note",
-        "alert.entity", "subtask.manage", "attachment.write", "ocr.run", "export",
+        "alert.entity", "subtask.manage", "attachment.write", "export",
     },
     # 应急处置人：执行处置子任务，并维护本人受指派的告警信息
     "responder": {
         "alert.view", "alert.edit", "alert.note", "alert.entity",
-        "subtask.execute", "attachment.write", "ocr.run",
+        "subtask.execute", "attachment.write",
     },
     # 上报人：填报告警，并维护本人上报的告警
     "reporter": {
         "alert.view", "alert.create", "alert.edit", "alert.note",
-        "alert.entity", "attachment.write", "ocr.run",
+        "alert.entity", "attachment.write",
     },
     # 业务关联人：维护本人经手告警中的记录、实体和附件
     "liaison": {
         "alert.view", "alert.edit", "alert.note", "alert.entity",
-        "attachment.write", "ocr.run",
+        "attachment.write",
     },
 }
 
@@ -99,7 +98,7 @@ SCOPE_BYPASS_ROLES = {"admin"}
 #   'assigned' 需为 handler 或该告警某处置子任务的 assignee（应急处置人语义）
 #   'self'     指派类：仅能增删本人（自领/自撤）
 ROLE_SCOPES = {
-    # 研判人员：只能处理本人经手（自建/自领）的告警；可自领或退出本人，不可改派他人
+    # 研判人员：业务操作收敛到本人经手范围；指派允许未分派告警或本人经手告警选择有效账号
     "analyst": {
         "alert.view": "handler",
         "alert.edit": "handler",
@@ -110,9 +109,8 @@ ROLE_SCOPES = {
         "subtask.manage": "handler",
         "alert.reject": "handler",
         "alert.reopen": "handler",
-        "alert.assign": "self",
+        "alert.assign": "handler",
         "alert.note": "handler",
-        "ocr.run": "handler",
     },
     # 应急处置人：只能看/处置受指派（本人为处理人或某处置子任务的执行人）的告警
     "responder": {
@@ -129,7 +127,6 @@ ROLE_SCOPES = {
         "alert.note": "handler",
         "alert.entity": "handler",
         "attachment.write": "handler",
-        "ocr.run": "handler",
         "alert.edit": "handler",
     },
     # 业务关联人：只能查看和维护本人经手的告警
@@ -139,7 +136,6 @@ ROLE_SCOPES = {
         "alert.note": "handler",
         "alert.entity": "handler",
         "attachment.write": "handler",
-        "ocr.run": "handler",
     },
     # admin：对象级豁免（可处理任意告警）
 }
@@ -152,7 +148,7 @@ _SCOPE_RANK = {"self": 0, "handler": 1, "assigned": 2}
 RESOURCE_SCOPED_PERMISSIONS = {
     "alert.view", "alert.edit", "alert.delete", "alert.conclude", "alert.status",
     "alert.assign", "alert.reject", "alert.reopen", "alert.note", "alert.entity",
-    "subtask.manage", "subtask.execute", "attachment.write", "ocr.run",
+    "subtask.manage", "subtask.execute", "attachment.write",
 }
 ROLE_DEFAULT_SCOPES = {
     "analyst": "handler",
@@ -284,7 +280,7 @@ def effective_scope(user: Dict[str, Any], permission: str) -> Optional[str]:
 # own           = 仅本人经手/受指派的告警（研判人员/业务关联人/应急处置人）
 QUEUE_SEE_ALL_ROLES = {"admin"}
 # 研判人员除本人经手外，还能看待分配告警，以便主动认领。
-QUEUE_SEE_UNASSIGNED_ROLES = {"analyst"}
+QUEUE_SEE_UNASSIGNED_ROLES = {"analyst", "reporter"}
 
 
 def queue_visibility(user: Dict[str, Any]) -> str:
@@ -436,6 +432,10 @@ def init_auth() -> None:
                 "INSERT OR IGNORE INTO role_permissions (role_code, permission_code) VALUES ('responder', 'subtask.execute')"
             )
             policy_version = 3
+        if policy_version < 4:
+            conn.execute("DELETE FROM role_permissions WHERE permission_code = 'ocr.run'")
+            conn.execute("DELETE FROM permissions WHERE code = 'ocr.run'")
+            policy_version = 4
         conn.execute(
             "INSERT OR REPLACE INTO auth_meta (key, value) VALUES ('permission_policy_version', ?)",
             (str(policy_version),),
@@ -978,7 +978,7 @@ def resolve_api_token(raw: str) -> Optional[Dict[str, Any]]:
         token_id = row["id"]
     return {
         "id": f"apitoken:{token_id}",
-        "username": f"svc:{token_id}",
+        "username": f"svc:{name}",
         "display_name": f"服务令牌：{name}",
         "is_service": True,
         "status": "active",

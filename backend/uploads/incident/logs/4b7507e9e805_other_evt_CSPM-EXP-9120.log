@@ -1,0 +1,19 @@
+==============================================================================
+ 云安全态势管理 CSPM  取证日志导出
+ 导出时间: 2026-06-19 01:46:52  时区: Asia/Shanghai (UTC+8)
+ 关联规则: CSPM-EXP-9120  对象存储桶 ACL 公网可读
+ ATT&CK: T1530 Data from Cloud Storage Object
+==============================================================================
+
+2026-06-18 11:40:00  HOST  EventID=1 (ProcessCreate / Auth)
+  Computer: HOST
+  User: -
+  Image/Process: -
+  CommandLine: -
+  ParentImage: -
+  Action: -
+  Hashes: SHA256=-
+
+VERDICT: UNDER_INVESTIGATION
+KeyEvidence: OSS 桶 ACL=public-read；含 DB 备份与客户资料；可匿名列举下载
+Handling: 立即将桶 ACL 改为私有，核查访问日志确认是否已被下载，启用桶策略与访问告警。

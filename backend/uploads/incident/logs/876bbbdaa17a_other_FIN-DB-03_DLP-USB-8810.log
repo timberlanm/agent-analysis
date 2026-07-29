@@ -1,0 +1,19 @@
+==============================================================================
+ 终端管控平台 DLP  取证日志导出
+ 导出时间: 2026-06-19 01:46:52  时区: Asia/Shanghai (UTC+8)
+ 关联规则: DLP-USB-8810  敏感区主机接入未登记 USB
+ ATT&CK: T1052.001 Exfiltration over USB
+==============================================================================
+
+2026-06-18 18:26:00  FIN-DB-03  EventID=1 (ProcessCreate / Auth)
+  Computer: FIN-DB-03
+  User: CORP\db.admin
+  Image/Process: -
+  CommandLine: -
+  ParentImage: -
+  Action: -
+  Hashes: SHA256=-
+
+VERDICT: UNDER_INVESTIGATION
+KeyEvidence: 未登记 USB（SN 070B1A2C）；复制 1.2GB 文件外带；主机位于禁用外设的敏感区
+Handling: 联系责任人核实用途，封禁该主机 USB 存储权限，审计复制文件是否含敏感数据。

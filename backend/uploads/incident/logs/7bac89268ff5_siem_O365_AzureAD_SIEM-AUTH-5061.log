@@ -1,0 +1,19 @@
+==============================================================================
+ Microsoft Sentinel  取证日志导出
+ 导出时间: 2026-06-19 01:46:51  时区: Asia/Shanghai (UTC+8)
+ 关联规则: SIEM-AUTH-5061  短时间多次 MFA 推送后批准
+ ATT&CK: T1621 Multi-Factor Authentication Request Generation
+==============================================================================
+
+2026-06-19 01:19:00  O365 / AzureAD  EventID=1 (ProcessCreate / Auth)
+  Computer: O365 / AzureAD
+  User: CORP\zhao.lei
+  Image/Process: -
+  CommandLine: -
+  ParentImage: -
+  Action: -
+  Hashes: SHA256=-
+
+VERDICT: UNDER_INVESTIGATION
+KeyEvidence: 10 分钟 22 次 MFA 推送后批准；源 IP 185.220.101.45；非常规登录时段
+Handling: 撤销会话与令牌、重置口令，切换为号码匹配 MFA，提醒用户勿随意批准推送。

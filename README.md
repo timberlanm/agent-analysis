@@ -12,7 +12,6 @@
 - **批量操作**：批量关闭、分配研判责任人
 - **数据导出**：JSON / Markdown 格式导出单条告警，CSV 导出运营统计
 - **关联分析**：基于 IP/Hash/域名/URL 等实体自动发现关联告警
-- **截图/文本识别字段（可选 OCR）**：从告警截图或粘贴文本自动提取 IP/域名/Hash/命令行等，预填「告警详情」供研判员核对；未装引擎时自动降级
 - **审计日志**：完整记录所有告警操作历史
 - **SLA 管理**：按严重等级自动计算响应和处置时限
 
@@ -62,6 +61,31 @@ python backend/app.py
 
 # API + 前端（生产模式，访问 http://localhost:5000）
 python backend/app.py --serve-frontend
+```
+
+### Linux / Ubuntu
+
+Linux 服务使用独立运行目录、Gunicorn 和 systemd。配置模板与运行约定见
+[`deploy/linux/README.md`](deploy/linux/README.md)。Linux 安装依赖时使用：
+
+```bash
+python -m pip install -r backend/requirements-linux.txt
+```
+
+### GitHub 发布
+
+Windows 开发环境构建前端、校验测试数据并发布：
+
+```powershell
+.\deploy\publish.ps1 -Message "功能说明"
+```
+
+该发布包含 `frontend/dist`、SQLite测试种子以及测试图片、附件和日志。Ubuntu
+不安装 Node.js，发布后执行：
+
+```bash
+cd /opt/soc-workbench
+bash deploy/linux/update.sh
 ```
 
 **前端开发模式：**

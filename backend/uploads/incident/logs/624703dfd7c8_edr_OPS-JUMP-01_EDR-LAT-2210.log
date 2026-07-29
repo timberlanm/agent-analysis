@@ -1,0 +1,19 @@
+==============================================================================
+ VMware Carbon Black  取证日志导出
+ 导出时间: 2026-06-19 01:46:46  时区: Asia/Shanghai (UTC+8)
+ 关联规则: EDR-LAT-2210  PsExec 远程批量执行
+ ATT&CK: T1021.002 SMB Admin Shares
+==============================================================================
+
+2026-06-18 20:12:00  OPS-JUMP-01  EventID=1 (ProcessCreate / Auth)
+  Computer: OPS-JUMP-01
+  User: CORP\ops_patch
+  Image/Process: PsExec64.exe
+  CommandLine: PsExec64.exe @hosts.txt -u CORP\ops_patch -s cmd /c "wusa kb5039xxx.msu /quiet"
+  ParentImage: powershell.exe
+  Action: -
+  Hashes: SHA256=-
+
+VERDICT: BUSINESS
+KeyEvidence: 源为运维跳板机；账号 ops_patch；目标为 hosts.txt 中的资产；处于补丁变更窗口
+Handling: 确认为计划内补丁分发，标记为正常业务，建议将运维跳板机 PsExec 行为纳入基线。

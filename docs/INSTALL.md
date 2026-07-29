@@ -3,7 +3,7 @@
 本文件说明在一台**新机器**上运行「研判分析工作台」之前需要准备的运行环境与依赖。
 准备完成后，请按 [运行手册（RUN.md）](./RUN.md) 启动。
 
-> 一句话：装好 **Python**、**Node.js** 两个运行时 + 各自依赖即可；OCR 识别为可选能力。
+> 一句话：装好 **Python**、**Node.js** 两个运行时及各自依赖即可。
 
 ---
 
@@ -14,7 +14,7 @@
 | 操作系统 | Windows 10/11 | 提供 `start.bat` 一键脚本；Linux/macOS 可手动运行（见 RUN.md） |
 | Python | **3.8+**（建议 3.10–3.12） | 后端 Flask 服务 |
 | Node.js | **16+**（建议 18 LTS） | 前端 Vue3 + Vite4 构建，需自带 npm |
-| 磁盘 | ≥ 1 GB 空闲 | 依赖 + 构建产物；启用 OCR 再多约 300 MB |
+| 磁盘 | ≥ 1 GB 空闲 | 依赖 + 构建产物 |
 | 网络 | 安装阶段需联网 | 拉取 pip / npm 依赖；**运行阶段可离线** |
 
 ---
@@ -23,7 +23,6 @@
 
 - **后端**（`backend/`）：Flask + flask-cors + pyyaml，数据存 SQLite（首次运行自动创建）。
 - **前端**（`frontend/`）：Vue 3 + Element Plus + Vite，构建为静态产物 `frontend/dist/`，由 Flask 单端口托管。
-- **OCR（可选）**：`rapidocr-onnxruntime`，用于「从截图/文本识别字段」。**不安装时该功能自动降级**，其余功能不受影响。
 
 ---
 
@@ -69,8 +68,6 @@ pip config set global.trusted-host mirrors.aliyun.com
 pip install -r backend\requirements.txt
 ```
 
-> `requirements.txt` 里默认含一行 `rapidocr-onnxruntime`（OCR）。若**暂不需要 OCR 或安装卡住**，可先把该行注释掉再执行，功能会自动降级。
-
 ### 3.5 安装前端依赖
 
 ```bat
@@ -79,23 +76,10 @@ npm install
 cd ..
 ```
 
-### 3.6 （可选）安装 OCR 识别引擎
-
-若第 3.4 步注释掉了 OCR、或想单独安装：
-
-```bat
-pip install rapidocr-onnxruntime -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com
-```
-
-- 模型随包发布，**安装后运行期无需联网**、无需大模型/GPU、CPU 即可。
-- 装好后重启后端即生效（详见 RUN.md）。
-
----
-
 ## 4. 一键 vs 手动
 
 - **一键（Windows）**：完成 3.1–3.3 后，直接运行 `start.bat` 即可自动完成 3.4/3.5 的依赖安装与前端构建并启动。见 RUN.md。
-- **手动**：按 3.4–3.6 逐步执行，再按 RUN.md「手动启动」运行。
+- **手动**：按 3.4–3.5 逐步执行，再按 RUN.md「手动启动」运行。
 
 ---
 
@@ -117,7 +101,6 @@ pip install rapidocr-onnxruntime -i https://mirrors.aliyun.com/pypi/simple/ --tr
 | `npm install` 很慢 / 失败 | 设置 npmmirror registry（3.3） |
 | `'python' / 'npm' 不是内部或外部命令` | 未加入 PATH，重装并勾选 Add to PATH，或重开终端 |
 | pip 装到了别的 Python | 用 `python -m pip install ...` 明确指定当前解释器 |
-| OCR 依赖太大装不动 | 注释掉 requirements 里的 rapidocr 行，OCR 功能自动降级，其余正常 |
 
 ---
 

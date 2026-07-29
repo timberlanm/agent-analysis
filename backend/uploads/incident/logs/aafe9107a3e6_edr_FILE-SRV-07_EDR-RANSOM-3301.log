@@ -1,0 +1,19 @@
+==============================================================================
+ CrowdStrike Falcon  取证日志导出
+ 导出时间: 2026-06-19 01:46:45  时区: Asia/Shanghai (UTC+8)
+ 关联规则: EDR-RANSOM-3301  高频文件改写 + vssadmin 删除卷影
+ ATT&CK: T1486 / T1490
+==============================================================================
+
+2026-06-17 23:05:00  FILE-SRV-07  EventID=1 (ProcessCreate / Auth)
+  Computer: FILE-SRV-07
+  User: CORP\svc_fileshare
+  Image/Process: C:\ProgramData\svchost-update.exe
+  CommandLine: "C:\ProgramData\svchost-update.exe" -enc-all -ext .lockxz -k 2A9F
+  ParentImage: PSEXESVC.exe
+  Action: -
+  Hashes: SHA256=a7c3f0e9b2d18465f7a0c2e4d6b8f0a1c3e5d7b9f1a3c5e7d9b1f3a5c7e9d0b2
+
+VERDICT: TRUE_POSITIVE
+KeyEvidence: 4300+ 文件被改写为 .lockxz；vssadmin 删除卷影；勒索信 README_RESTORE.txt；PsExec 横向
+Handling: 立即断网隔离，保全样本与勒索信，启动备份恢复流程，全网排查 PsExec 来源主机。

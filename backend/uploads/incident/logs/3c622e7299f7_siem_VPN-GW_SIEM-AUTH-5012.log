@@ -1,0 +1,19 @@
+==============================================================================
+ Microsoft Sentinel  取证日志导出
+ 导出时间: 2026-06-19 01:46:51  时区: Asia/Shanghai (UTC+8)
+ 关联规则: SIEM-AUTH-5012  Impossible Travel 不可能旅行
+ ATT&CK: -
+==============================================================================
+
+2026-06-17 09:05:00  VPN-GW  EventID=1 (ProcessCreate / Auth)
+  Computer: VPN-GW
+  User: CORP\sun.wei
+  Image/Process: -
+  CommandLine: -
+  ParentImage: -
+  Action: -
+  Hashes: SHA256=-
+
+VERDICT: FALSE_POSITIVE
+KeyEvidence: 登录均通过公司 VPN 与受管设备；MFA 正常；已与本人/HR 确认出差行程
+Handling: 确认为出差正常登录，标记误报，可对 VPN 出口 IP 段做地理白名单优化。

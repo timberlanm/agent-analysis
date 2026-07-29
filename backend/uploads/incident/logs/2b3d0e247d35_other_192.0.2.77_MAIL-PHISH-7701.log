@@ -1,0 +1,19 @@
+==============================================================================
+ Proofpoint 邮件网关  取证日志导出
+ 导出时间: 2026-06-19 01:46:52  时区: Asia/Shanghai (UTC+8)
+ 关联规则: MAIL-PHISH-7701  含宏 Office 附件 + 仿冒发件人
+ ATT&CK: T1566.001 Spearphishing Attachment
+==============================================================================
+
+2026-06-19 08:02:00  HOST  EventID=1 (ProcessCreate / Auth)
+  Computer: HOST
+  User: wang.fang@corp.com
+  Image/Process: -
+  CommandLine: -
+  ParentImage: -
+  Action: -
+  Hashes: SHA256=d41d8cd98f00b204e9800998ecf8427e7a1b2c3d4e5f60718293a4b5c6d7e8f9
+
+VERDICT: UNDER_INVESTIGATION
+KeyEvidence: xlsm 恶意宏附件；仿冒发票主题；回连 invoice-2026.top；收件人为 C2 告警主机用户
+Handling: 全域检索同源邮件并清除，封禁发件域与回连域，对收件人主机做应急排查。

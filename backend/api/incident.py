@@ -7,7 +7,6 @@ import json
 from flask import Blueprint, Response, g, jsonify, request, send_from_directory
 
 from backend.services import incident_service
-from backend.services import ocr_service
 from backend.services import auth_service
 from backend.api.auth import require_perm, verify_csrf, current_user, is_service_request
 
@@ -92,7 +91,11 @@ def _scope_ok(alert: dict, permission: str) -> bool:
 
 
 def _handler_change_allowed(alert: dict, new_names):
-    """指派类操作的对象级判定：非豁免角色仅可增删本人，且不得对已完成告警操作（防变相重开）。"""
+    """指派类操作的对象级判定。
+
+    管理员可全局指派；其他持有指派权限的角色可处理尚未分派或本人经手的告警，
+    但不能越权改动已由他人接手的告警，也不能通过指派变相重开已完成告警。
+    """
     user = current_user()
     new = {str(n).strip() for n in (new_names or []) if str(n).strip()}
     inactive = sorted(n for n in new if not auth_service.is_active_username(n))
@@ -102,10 +105,15 @@ def _handler_change_allowed(alert: dict, new_names):
         return True, None
     username = user["username"]
     old = set(alert.get("handlers") or [])
-    if old.symmetric_difference(new) - {username}:
-        return False, "仅可自领或退出本人处理，改派他人请联系研判主管"
     if alert.get("status") == "closed":
         return False, "已完成告警的重开请联系研判主管"
+    scope = auth_service.effective_scope(user, "alert.assign")
+    if scope == "self":
+        if old.symmetric_difference(new) - {username}:
+            return False, "仅可自领或退出本人处理，改派他人请联系研判主管"
+        return True, None
+    if old and not _is_handler(alert, username):
+        return False, "无权改派该告警：仅限当前处理人或告警上报人操作"
     return True, None
 
 
@@ -359,41 +367,6 @@ def delete_attachment(attachment_id):
     if not ok:
         return jsonify({"success": False, "error": "附件不存在"}), 404
     return jsonify({"success": True})
-
-
-@incident_bp.route("/ocr/status", methods=["GET"])
-def ocr_status():
-    """OCR 能力探测：引擎是否就绪、用的哪个引擎、未就绪时的安装指引。"""
-    return jsonify({"success": True, "data": ocr_service.engine_status()})
-
-
-@incident_bp.route("/extract-fields", methods=["POST"])
-@require_perm("ocr.run")
-def extract_fields():
-    """从一段纯文本（如粘贴的告警内容）解析候选字段。纯规则，不依赖 OCR 引擎。"""
-    text = _json_body().get("text", "")
-    if not isinstance(text, str) or not text.strip():
-        return jsonify({"success": False, "error": "文本为空"}), 400
-    fields = ocr_service.parse_fields_from_text(text)
-    return jsonify({"success": True, "data": {"fields": fields}})
-
-
-@incident_bp.route("/alerts/<alert_id>/ocr", methods=["POST"])
-@require_perm("ocr.run")
-def ocr_alert(alert_id):
-    """对该告警的图片附件做 OCR，返回候选字段供研判员核对（不写库）。"""
-    alert = incident_service.get_alert(alert_id)
-    if not alert:
-        return jsonify({"success": False, "error": "告警不存在"}), 404
-    if not _read_ok(alert):
-        return _read_forbidden()
-    if not _scope_ok(alert, "ocr.run"):
-        return _scope_forbidden()
-    try:
-        result = ocr_service.extract_from_alert(alert_id)
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 400
-    return jsonify({"success": True, "data": result})
 
 
 @incident_bp.route("/alerts/<alert_id>/entities", methods=["GET"])

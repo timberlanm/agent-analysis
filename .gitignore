@@ -6,6 +6,13 @@ __pycache__/
 .venv/
 venv/
 env/
+.env
+.env.*
+!.env.example
+!.env.*.example
+.migration-backups/
+.pytest_cache/
+.test-tmp/
 
 # Node / Frontend
 node_modules/
@@ -49,3 +56,17 @@ flask_err.log
 
 # 内部：批量创建账号时导出的初始口令清单（分发后删除）
 初始账号口令*.txt
+
+# GitHub test-environment seed artifacts.  The Windows publisher builds the
+# frontend and commits the resulting static files because Ubuntu does not run
+# Node.js.  Test evidence is also committed so a fresh Ubuntu clone can
+# reproduce the demonstration alert queue.
+!frontend/dist/
+!frontend/dist/**
+!backend/data/analysis_store.db
+!backend/uploads/
+!backend/uploads/incident/
+!backend/uploads/incident/**
+
+# Per-environment runtime secrets must never be committed.
+backend/data/secret_key

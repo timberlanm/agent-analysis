@@ -1,0 +1,15 @@
+==============================================================================
+ 安恒 玄武盾 WAF  取证日志导出
+ 导出时间: 2026-06-19 01:46:50  时区: Asia/Shanghai (UTC+8)
+ 关联规则: WAF-UPLOAD-0610  可疑文件上传：双扩展名 / 脚本类型
+ ATT&CK: T1505.003 Web Shell
+==============================================================================
+
+2026-06-18 16:47:00  198.51.100.66 -> shop.example.com
+  "POST https://shop.example.com/upload?filename=1.aspx;.jpg" 200
+  User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)
+  WAF-Rule: 可疑文件上传：双扩展名 / 脚本类型 (WAF-UPLOAD-0610)  Action: Log/Pass
+
+VERDICT: UNDER_INVESTIGATION
+KeyEvidence: 上传 1.aspx;.jpg 双扩展名；响应 200；源 IP 与 EDR Webshell 告警同源
+Handling: 核查上传目录是否落地 1.aspx，删除后门并修复上传校验，结合 EDR 告警按入侵处置。

@@ -484,8 +484,8 @@ body {
     </div>
     <div class="card philosophy-card">
       <div class="icon-circle">🤝</div>
-      <h3>人机协同</h3>
-      <p>机器负责"省录入"（归一化、OCR、正则抽取 IOC），人负责"保准确"（核对、下结论、决定处置）。</p>
+      <h3>分析师主导</h3>
+      <p>平台负责归一化、流程约束和全程留痕，分析师负责核对证据、下结论和决定处置。</p>
     </div>
     <div class="card philosophy-card">
       <div class="icon-circle">📝</div>
@@ -503,7 +503,7 @@ body {
 <!-- ========== 第 4 页：核心功能总览 ========== -->
 <section class="slide">
   <span class="section-label">核心功能</span>
-  <h2 class="slide-title">九大核心功能</h2>
+  <h2 class="slide-title">八大核心功能</h2>
   <p class="slide-subtitle">覆盖告警从接入到归档的全生命周期</p>
 
   <div class="card-grid card-grid-3">
@@ -521,11 +521,6 @@ body {
       <span class="feature-icon">🔄</span>
       <h3>研判处理闭环</h3>
       <p>状态机 + 结论驱动路由 + 完成门控 + 闭环回流，不让告警"烂尾"</p>
-    </div>
-    <div class="card feature-card">
-      <span class="feature-icon">🔍</span>
-      <h3>智能字段识别</h3>
-      <p>截图 OCR（离线）+ 文本解析，自动提取 IP/域名/Hash/URL 预填字段</p>
     </div>
     <div class="card feature-card">
       <span class="feature-icon">📋</span>
@@ -675,49 +670,6 @@ body {
 
   <div class="highlight-box" style="margin-top: 24px;">
     <p>💡 <strong>完成门控</strong>：置为「已完成」前校验<strong>研判依据</strong>与<strong>处置建议</strong>两项非空，缺失则拒绝完成——保证每条闭环的告警都有据可查、有处置可循。</p>
-  </div>
-</section>
-
-<!-- ========== 第 8 页：智能字段识别 ========== -->
-<section class="slide">
-  <span class="section-label">功能详解 3</span>
-  <h2 class="slide-title">智能字段识别（OCR + 文本解析）</h2>
-  <p class="slide-subtitle">告警截图 → 自动提取 IOC → 预填字段，省去人工摘录</p>
-
-  <div class="two-col">
-    <div>
-      <h3 style="font-size: 18px; margin-bottom: 16px;">两种识别方式</h3>
-
-      <div class="card" style="margin-bottom: 16px;">
-        <h4>📸 截图识别</h4>
-        <p>详情页点击「从截图识别字段」，本地 OCR（RapidOCR，离线、中英文、CPU）把告警截图转文字，再抽取字段预填「告警详情」。</p>
-      </div>
-      <div class="card" style="margin-bottom: 16px;">
-        <h4>✏️ 文本识别</h4>
-        <p>上报页「告警详情」框粘贴文本即自动识别，或点「从文本识别字段」，无需 OCR 引擎（纯规则）。</p>
-      </div>
-
-      <h3 style="font-size: 16px; margin-bottom: 12px;">两段解析逻辑</h3>
-      <ul style="color: var(--text-secondary); padding-left: 20px; font-size: 14px; line-height: 1.8;">
-        <li>逐行「标签: 值」匹配（支持中英文冒号/等号/空格分隔，能区分源/目的 IP）</li>
-        <li>正则兜底抽取 IP/Hash/域名/路径，并剔除 <code>powershell.exe</code> 之类文件名误判</li>
-      </ul>
-
-      <div class="highlight-box" style="background: var(--warning-light);">
-        <p>⚠️ <strong>优雅降级</strong>：未安装 OCR 引擎时，识别功能给出安装指引，其余功能不受影响。</p>
-      </div>
-    </div>
-
-    <div style="display: flex; gap: 16px; align-items: flex-start; justify-content: center; max-width: 760px; margin: 20px auto;">
-      <div class="img-frame" style="flex: 1;">
-        <img src="screenshots/sample-ndr-alert.png" alt="NDR 告警截图 - OCR 识别输入">
-        <p class="img-caption">NDR 告警截图 — OCR 识别的输入素材</p>
-      </div>
-      <div class="img-frame" style="flex: 1;">
-        <img src="screenshots/sample-siem-alert.png" alt="SIEM 告警截图 - OCR 识别输入">
-        <p class="img-caption">SIEM 告警截图 — 字段各异，归一化后统一展示</p>
-      </div>
-    </div>
   </div>
 </section>
 
@@ -892,12 +844,6 @@ body {
         </li>
         <li>
           <div class="step-content">
-            <h4>OCR / 文本识别</h4>
-            <p>在告警详情页点「从截图识别字段」做 OCR，或在上报页粘贴文本后点「从文本识别字段」自动提取 IOC。</p>
-          </div>
-        </li>
-        <li>
-          <div class="step-content">
             <h4>指派处理人</h4>
             <p>在告警队列点「指派」按钮，或详情页指派处理人。指派后自动进入「研判中」。</p>
           </div>
@@ -967,7 +913,7 @@ body {
     <div class="card">
       <div style="font-size: 28px; margin-bottom: 10px;">📸</div>
       <h3>只有截图/文本的上报</h3>
-      <p>OCR/文本识别自动提取 IOC 预填，省去人工摘录。拖拽截图到队列即可快速创建告警。</p>
+      <p>保留原始截图和文本，由上报人或分析师填写关键安全字段；拖拽截图到队列即可快速创建告警。</p>
     </div>
     <div class="card">
       <div style="font-size: 28px; margin-bottom: 10px;">🔄</div>

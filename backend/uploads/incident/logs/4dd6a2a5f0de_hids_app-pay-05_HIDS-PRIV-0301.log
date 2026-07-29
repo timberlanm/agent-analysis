@@ -1,0 +1,19 @@
+==============================================================================
+ 安全狗 HIDS  取证日志导出
+ 导出时间: 2026-06-19 01:46:47  时区: Asia/Shanghai (UTC+8)
+ 关联规则: HIDS-PRIV-0301  sudoers 文件被修改
+ ATT&CK: T1548.003 Sudo
+==============================================================================
+
+2026-06-17 10:22:00  app-pay-05  EventID=1 (ProcessCreate / Auth)
+  Computer: app-pay-05
+  User: root
+  Image/Process: /etc/sudoers.d/90-ops
+  CommandLine: /usr/bin/python3 ansible sudoers.yml --limit pay-group
+  ParentImage: -
+  Action: 文件修改
+  Hashes: SHA256=-
+
+VERDICT: FALSE_POSITIVE
+KeyEvidence: 变更由 ansible-playbook 触发；来源为运维 CMDB 跳板机；多主机同时一致变更
+Handling: 确认为配置管理下发，标记误报并纳入白名单，建议变更前与安全团队报备。

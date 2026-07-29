@@ -1,0 +1,15 @@
+==============================================================================
+ 长亭 雷池 WAF  取证日志导出
+ 导出时间: 2026-06-19 01:46:50  时区: Asia/Shanghai (UTC+8)
+ 关联规则: WAF-SCAN-0701  已知漏洞扫描器特征
+ ATT&CK: T1595 Active Scanning
+==============================================================================
+
+2026-06-17 14:38:00  10.70.2.30 -> shop.example.com
+  "GET https://shop.example.com/?scan=acunetix-wvs-test" 403
+  User-Agent: Mozilla/5.0 (compatible; acunetix-wvs)
+  WAF-Rule: 已知漏洞扫描器特征 (WAF-SCAN-0701)  Action: Block(403)
+
+VERDICT: FALSE_POSITIVE
+KeyEvidence: 源为内网 AppSec 扫描机 10.70.2.30；UA=acunetix；匹配计划单 SEC-SCAN-2026Q2
+Handling: 确认为授权扫描，临时加入扫描白名单并标记误报，扫描结束后移除白名单。

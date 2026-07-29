@@ -1,0 +1,19 @@
+==============================================================================
+ Splunk Enterprise Security  取证日志导出
+ 导出时间: 2026-06-19 01:46:50  时区: Asia/Shanghai (UTC+8)
+ 关联规则: SIEM-AUTH-5012  Impossible Travel 不可能旅行
+ ATT&CK: T1078 Valid Accounts
+==============================================================================
+
+2026-06-19 06:33:00  VPN-GW / O365  EventID=1 (ProcessCreate / Auth)
+  Computer: VPN-GW / O365
+  User: CORP\li.qiang
+  Image/Process: -
+  CommandLine: -
+  ParentImage: -
+  Action: -
+  Hashes: SHA256=-
+
+VERDICT: UNDER_INVESTIGATION
+KeyEvidence: 35 分钟内杭州与境外双成功登录；地理不可能旅行；账号 li.qiang
+Handling: 强制下线并重置该账号、启用 MFA，核查邮箱规则与近期访问，排查钓鱼来源。

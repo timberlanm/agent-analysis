@@ -13,7 +13,11 @@ _ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_ROOT))
 
 # import 期就把库指向临时目录（collection 阶段的 init_db 也不碰真实库）
+os.environ.pop("DATABASE_URL", None)
+os.environ["APP_SKIP_LOCAL_ENV"] = "1"
+os.environ.setdefault("APP_DATA_DIR", str(Path(tempfile.mkdtemp()) / "data"))
 os.environ.setdefault("INCIDENT_DB_PATH", str(Path(tempfile.mkdtemp()) / "collect.db"))
+os.environ.setdefault("INCIDENT_UPLOAD_DIR", str(Path(tempfile.mkdtemp()) / "uploads"))
 
 import pytest  # noqa: E402
 import backend.services.incident_service as isvc  # noqa: E402

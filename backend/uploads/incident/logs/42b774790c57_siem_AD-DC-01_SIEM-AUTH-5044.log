@@ -1,0 +1,19 @@
+==============================================================================
+ Splunk Enterprise Security  取证日志导出
+ 导出时间: 2026-06-19 01:46:51  时区: Asia/Shanghai (UTC+8)
+ 关联规则: SIEM-AUTH-5044  单源对多账号低频尝试（喷洒）
+ ATT&CK: T1110.003 Password Spraying
+==============================================================================
+
+2026-06-18 00:47:00  AD-DC-01  EventID=1 (ProcessCreate / Auth)
+  Computer: AD-DC-01
+  User: （多账号）
+  Image/Process: -
+  CommandLine: -
+  ParentImage: -
+  Action: -
+  Hashes: SHA256=-
+
+VERDICT: UNDER_INVESTIGATION
+KeyEvidence: 单源对 320 账号低频尝试；27 账号锁定；源 IP 45.146.19.77 与 C2 同源
+Handling: 封禁源 IP，重置被命中账号口令，强化锁定策略与 MFA，排查是否有账号被成功爆破。

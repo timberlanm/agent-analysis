@@ -1,0 +1,23 @@
+==============================================================================
+ Splunk Enterprise Security  取证日志导出
+ 导出时间: 2026-06-19 01:52:59  时区: Asia/Shanghai (UTC+8)
+ 关联规则: SIEM-LAT-5120  WinRM 5985 远程会话 + 异常源
+ ATT&CK: T1021.006 Windows Remote Management
+==============================================================================
+
+2026-06-16 02:28:00  FIN-DB-01  EventID=1 (ProcessCreate / Auth)
+  Computer: FIN-DB-01
+  User: CORP\svc_sql
+  Image/Process: -
+  CommandLine: -
+  ParentImage: -
+  Action: -
+  Hashes: SHA256=-
+
+2026-06-16 02:28:00  FIN-DB-01  EventID=3 (NetworkConnect)
+  SourceIp: 10.22.4.22  DestinationIp: 10.30.1.10:-
+  DestinationHostname: corp.local
+
+VERDICT: TRUE_POSITIVE
+KeyEvidence: svc_sql 经 WinRM 从 FIN-PC-22 登录 FIN-DB-01；账号非常用源；凭据源自 DCSync
+Handling: 重置 svc_sql、隔离 FIN-DB-01，核查数据库访问与导出记录，收敛 WinRM 暴露面。

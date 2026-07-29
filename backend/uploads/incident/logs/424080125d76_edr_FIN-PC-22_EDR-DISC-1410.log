@@ -1,0 +1,23 @@
+==============================================================================
+ 奇安信 天擎 EDR  取证日志导出
+ 导出时间: 2026-06-19 01:52:58  时区: Asia/Shanghai (UTC+8)
+ 关联规则: EDR-DISC-1410  BloodHound/SharpHound 域采集
+ ATT&CK: T1087.002 / T1482 Domain Trust Discovery
+==============================================================================
+
+2026-06-14 23:14:00  FIN-PC-22  EventID=1 (ProcessCreate / Auth)
+  Computer: FIN-PC-22
+  User: CORP\chen.jing
+  Image/Process: C:\Users\chen.jing\AppData\Local\Temp\SharpHound.exe
+  CommandLine: SharpHound.exe -c All --zipfilename fin.zip
+  ParentImage: powershell.exe
+  Action: -
+  Hashes: SHA256=2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f80910
+
+2026-06-14 23:14:00  FIN-PC-22  EventID=3 (NetworkConnect)
+  SourceIp: 10.22.4.22  DestinationIp: 10.10.0.2:-
+  DestinationHostname: -
+
+VERDICT: SUSPICIOUS
+KeyEvidence: SharpHound -c All；对 AD-DC-02 大量 LDAP；生成 fin.zip 采集结果
+Handling: 保全采集文件，按 BloodHound 视角评估可达路径，重点保护高价值账号与 DA 组。

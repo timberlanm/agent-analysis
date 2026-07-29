@@ -1,0 +1,4 @@
+-r requirements.txt
+
+# Linux service process manager.
+gunicorn

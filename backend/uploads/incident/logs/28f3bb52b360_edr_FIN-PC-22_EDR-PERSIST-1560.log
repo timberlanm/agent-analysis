@@ -1,0 +1,19 @@
+==============================================================================
+ Microsoft Defender for Endpoint  取证日志导出
+ 导出时间: 2026-06-19 01:52:58  时区: Asia/Shanghai (UTC+8)
+ 关联规则: EDR-PERSIST-1560  WMI __EventFilter + CommandLineEventConsumer 创建
+ ATT&CK: T1546.003 WMI Event Subscription
+==============================================================================
+
+2026-06-14 22:41:00  FIN-PC-22  EventID=1 (ProcessCreate / Auth)
+  Computer: FIN-PC-22
+  User: CORP\chen.jing
+  Image/Process: powershell.exe
+  CommandLine: powershell -nop -c "$f=Set-WmiInstance __EventFilter ...; Set-WmiInstance CommandLineEventConsumer ..."
+  ParentImage: mshta.exe
+  Action: -
+  Hashes: SHA256=-
+
+VERDICT: SUSPICIOUS
+KeyEvidence: WMI 永久事件订阅；CommandLineEventConsumer 指向加载器；父进程 mshta
+Handling: 删除恶意 WMI 订阅（Get-WmiObject __EventFilter/__EventConsumer），全网排查同类持久化。

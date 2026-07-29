@@ -1,0 +1,19 @@
+==============================================================================
+ 青藤云 HIDS  取证日志导出
+ 导出时间: 2026-06-19 01:46:47  时区: Asia/Shanghai (UTC+8)
+ 关联规则: HIDS-PERSIST-0511  authorized_keys 异常写入
+ ATT&CK: T1098.004 SSH Authorized Keys
+==============================================================================
+
+2026-06-19 04:11:00  web-node-12  EventID=1 (ProcessCreate / Auth)
+  Computer: web-node-12
+  User: root
+  Image/Process: /root/.ssh/authorized_keys
+  CommandLine: echo 'ssh-rsa AAAAB3Nza...attacker' >> /root/.ssh/authorized_keys
+  ParentImage: -
+  Action: 文件追加写入
+  Hashes: SHA256=-
+
+VERDICT: UNDER_INVESTIGATION
+KeyEvidence: authorized_keys 新增未知公钥；时间紧随爆破成功；写入进程为交互式 bash
+Handling: 清除非法公钥，排查 .ssh 目录权限与其它账号，结合爆破告警按失陷处置。

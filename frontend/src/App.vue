@@ -94,6 +94,7 @@ import {
 } from '@element-plus/icons-vue'
 import { auth } from './store/auth'
 import { authChangePassword } from './api'
+import { clearSessionResume, safeInternalPath, saveSessionResume } from './utils/sessionResume'
 import AdminUsers from './components/AdminUsers.vue'
 import AuditLog from './components/AuditLog.vue'
 
@@ -131,6 +132,7 @@ function onUserCommand(cmd) {
 }
 
 async function doLogout() {
+  clearSessionResume()
   await auth.logout()
   router.push('/login')
 }
@@ -151,11 +153,29 @@ async function submitChangePassword() {
 }
 
 // ---- 会话失效 -> 回登录页 ----
+let handlingUnauthorized = false
 function handleUnauthorized() {
-  if (route.meta.public) return
+  if (route.meta.public || handlingUnauthorized) return
+  handlingUnauthorized = true
+
+  const resumeCapture = {
+    viewState: null,
+    setViewState(value) {
+      if (value && typeof value === 'object') this.viewState = value
+    },
+  }
+  window.dispatchEvent(new CustomEvent('capture-session-resume', { detail: resumeCapture }))
+
+  const redirect = safeInternalPath(route.fullPath)
+  saveSessionResume({
+    username: auth.username,
+    path: redirect,
+    viewState: resumeCapture.viewState,
+  })
   auth._clear()
   ElMessage.warning('登录已失效，请重新登录')
-  router.push({ path: '/login', query: { redirect: route.fullPath } })
+  router.replace({ path: '/login', query: { redirect } })
+    .finally(() => { handlingUnauthorized = false })
 }
 onMounted(() => window.addEventListener('auth-unauthorized', handleUnauthorized))
 onBeforeUnmount(() => window.removeEventListener('auth-unauthorized', handleUnauthorized))

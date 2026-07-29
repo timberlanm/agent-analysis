@@ -1,0 +1,15 @@
+==============================================================================
+ 长亭 雷池 WAF  取证日志导出
+ 导出时间: 2026-06-19 01:46:49  时区: Asia/Shanghai (UTC+8)
+ 关联规则: WAF-SQLI-0901  UNION SELECT 联合查询注入
+ ATT&CK: T1190 Exploit Public-Facing Application
+==============================================================================
+
+2026-06-19 10:05:00  203.0.113.88 -> shop.example.com
+  "GET https://shop.example.com/product?id=1%20UNION%20SELECT%20username,password%20FROM%20users--" 403
+  User-Agent: sqlmap/1.8.2#stable (https://sqlmap.org)
+  WAF-Rule: UNION SELECT 联合查询注入 (WAF-SQLI-0901)  Action: Block(403)
+
+VERDICT: UNDER_INVESTIGATION
+KeyEvidence: UNION SELECT ... FROM users 注入；UA=sqlmap；同源高频 payload；WAF 已拦截 403
+Handling: 确认拦截有效，封禁源 IP，复核接口是否存在可绕过点与历史成功注入。

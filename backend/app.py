@@ -9,11 +9,60 @@ Flask 主应用入口 — 同时托管 API 和前端静态文件
 import sys
 import os
 
+# Load the machine-local runtime configuration before importing application
+# modules. Explicit process variables take precedence, which allows CI,
+# containers, and one-off command-line overrides to select another database.
+_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+
+
+def _load_local_environment():
+    if os.environ.get("APP_SKIP_LOCAL_ENV", "").strip() == "1":
+        return
+
+    env_path = os.environ.get(
+        "APP_ENV_FILE",
+        os.path.join(_PROJECT_ROOT, ".env.postgres.local"),
+    )
+    if not os.path.isfile(env_path):
+        return
+
+    with open(env_path, "r", encoding="utf-8-sig") as env_file:
+        for raw_line in env_file:
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip()
+            if not key:
+                continue
+            if (
+                len(value) >= 2
+                and value[0] == value[-1]
+                and value[0] in {"'", '"'}
+            ):
+                value = value[1:-1]
+            os.environ.setdefault(key, value)
+
+
+_load_local_environment()
+
 # 添加项目根目录到 Python 路径
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.insert(0, _PROJECT_ROOT)
 
 from flask import Flask, jsonify, send_from_directory
 from flask_cors import CORS
+from backend.database import (
+    connect_postgresql,
+    is_postgresql,
+    validate_runtime_database,
+)
+
+# A Linux/systemd deployment can set REQUIRE_POSTGRESQL=true to make a missing
+# or malformed DATABASE_URL fatal instead of silently opening the legacy
+# SQLite database.
+validate_runtime_database()
+
 from backend.config import (
     FLASK_HOST, FLASK_PORT, FLASK_DEBUG, API_PREFIX, ALLOWED_ORIGINS,
 )
@@ -80,10 +129,29 @@ def create_app(serve_frontend=False):
     # 健康检查
     @app.route('/health')
     def health():
+        database = {"mode": "sqlite", "connected": True}
+        status_code = 200
+        if is_postgresql():
+            try:
+                with connect_postgresql() as conn:
+                    row = conn.execute(
+                        "SELECT current_database() AS database_name, "
+                        "current_user AS database_user"
+                    ).fetchone()
+                database = {
+                    "mode": "postgresql",
+                    "connected": True,
+                    "database": row["database_name"],
+                    "user": row["database_user"],
+                }
+            except Exception:
+                database = {"mode": "postgresql", "connected": False}
+                status_code = 503
         return jsonify({
-            "status": "healthy",
-            "service": "incident-analysis-backend"
-        })
+            "status": "healthy" if status_code == 200 else "unhealthy",
+            "service": "incident-analysis-backend",
+            "database": database,
+        }), status_code
 
     # API 根路径
     @app.route(f'{API_PREFIX}')

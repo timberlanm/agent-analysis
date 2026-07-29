@@ -1,0 +1,19 @@
+==============================================================================
+ 奇安信 天擎 EDR  取证日志导出
+ 导出时间: 2026-06-19 01:52:59  时区: Asia/Shanghai (UTC+8)
+ 关联规则: EDR-COLL-1310  命令行打包工具加密暂存大量文件
+ ATT&CK: T1560.001 Archive via Utility
+==============================================================================
+
+2026-06-17 00:51:00  FIN-DB-01  EventID=1 (ProcessCreate / Auth)
+  Computer: FIN-DB-01
+  User: CORP\svc_sql
+  Image/Process: C:\Windows\Temp\bak.7z
+  CommandLine: 7z a -t7z -pXy9!q2 -mhe=on C:\Windows\Temp\bak.7z D:\finance\reports\* D:\finance\export\*
+  ParentImage: wsmprovhost.exe
+  Action: -
+  Hashes: SHA256=5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c
+
+VERDICT: TRUE_POSITIVE
+KeyEvidence: 7z 加密打包 D:\finance 数据；落地 bak.7z；父进程为 WinRM 宿主 wsmprovhost
+Handling: 保全 bak.7z 评估泄露范围，阻断外联，按数据泄露事件升级并通知合规。

@@ -1,0 +1,15 @@
+==============================================================================
+ 安恒 玄武盾 WAF  取证日志导出
+ 导出时间: 2026-06-19 01:46:50  时区: Asia/Shanghai (UTC+8)
+ 关联规则: WAF-LFI-0322  路径穿越 ../ 读取敏感文件
+ ATT&CK: T1083 File and Directory Discovery
+==============================================================================
+
+2026-06-18 13:02:00  203.0.113.150 -> api.example.com
+  "GET https://api.example.com/download?file=../../../../etc/passwd" 403
+  User-Agent: curl/8.4.0
+  WAF-Rule: 路径穿越 ../ 读取敏感文件 (WAF-LFI-0322)  Action: Block(403)
+
+VERDICT: UNDER_INVESTIGATION
+KeyEvidence: file=../../../../etc/passwd；多次穿越探测；WAF 已拦截 403
+Handling: 确认下载接口已做路径规范化，封禁源 IP，复核是否存在未经 WAF 的直连路径。

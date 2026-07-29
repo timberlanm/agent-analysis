@@ -15,13 +15,38 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from werkzeug.utils import secure_filename
+from backend.database import connect_postgresql, is_postgresql
 
 
 BASE_DIR = Path(__file__).resolve().parents[1]
-DATA_DIR = BASE_DIR / "data"
-UPLOAD_BASE = str(BASE_DIR / "uploads" / "incident")
+
+
+def _configured_runtime_path(variable: str, default: Path) -> Path:
+    configured = os.environ.get(variable, "").strip()
+    if not configured:
+        return default.resolve()
+    path = Path(configured).expanduser()
+    if not path.is_absolute():
+        path = BASE_DIR.parent / path
+    return path.resolve()
+
+
+# Runtime state can live outside the source tree on Linux.  Relative overrides
+# remain project-root-relative so service startup never depends on cwd.
+DATA_DIR = _configured_runtime_path("APP_DATA_DIR", BASE_DIR / "data")
+
+
+def _configured_upload_base() -> Path:
+    return _configured_runtime_path(
+        "INCIDENT_UPLOAD_DIR",
+        BASE_DIR / "uploads" / "incident",
+    )
+
+
+UPLOAD_BASE = str(_configured_upload_base())
 # 可用环境变量 INCIDENT_DB_PATH 覆盖库路径（测试隔离用；默认仍是仓库内 data 库）
 DB_PATH = Path(os.environ.get("INCIDENT_DB_PATH") or (DATA_DIR / "analysis_store.db"))
+_POSTGRES_SCHEMA_READY = False
 
 ALLOWED_IMAGE_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 LOG_EXTENSIONS = {".json", ".txt", ".log", ".csv", ".out"}
@@ -249,6 +274,28 @@ def _parse_time(value: Any) -> Optional[datetime]:
         return None
 
 
+def _format_alert_no(sequence_value: int, created_at: Any) -> str:
+    created_time = _parse_time(created_at) or datetime.now(timezone.utc)
+    china_time = created_time.astimezone(timezone(timedelta(hours=8)))
+    return f"SOC-{china_time:%Y%m%d}-{sequence_value:06d}"
+
+
+def _next_alert_no(conn: Any, created_at: Any) -> str:
+    result = conn.execute(
+        "UPDATE app_sequences SET value = value + 1 WHERE name = ?",
+        ("alert_number",),
+    )
+    if result.rowcount != 1:
+        raise RuntimeError("告警编号序列尚未初始化，请先执行数据库迁移")
+    row = conn.execute(
+        "SELECT value FROM app_sequences WHERE name = ?",
+        ("alert_number",),
+    ).fetchone()
+    if not row:
+        raise RuntimeError("无法读取告警编号序列")
+    return _format_alert_no(int(row["value"]), created_at)
+
+
 def _correlation_level(score: int) -> str:
     if score >= 90:
         return "strong"
@@ -323,14 +370,18 @@ def _json_dumps(value: Any) -> str:
 def _json_loads(value: Any, fallback: Any = None) -> Any:
     if value is None or value == "":
         return fallback
+    if isinstance(value, (dict, list)):
+        return value
     try:
         return json.loads(value)
     except (TypeError, json.JSONDecodeError):
         return fallback
 
 
-def _conn() -> sqlite3.Connection:
+def _conn() -> Any:
     _ensure_dirs()
+    if is_postgresql():
+        return connect_postgresql()
     conn = sqlite3.connect(DB_PATH, factory=ClosingConnection, timeout=8.0)
     conn.row_factory = sqlite3.Row
     # busy_timeout 必须最先设置:并发请求下拿不到锁时自旋等待(而非立即 database is locked → 500)。
@@ -347,11 +398,28 @@ def _conn() -> sqlite3.Connection:
 
 
 def init_db() -> None:
+    global _POSTGRES_SCHEMA_READY
+    if is_postgresql():
+        if _POSTGRES_SCHEMA_READY:
+            return
+        with _conn() as conn:
+            row = conn.execute(
+                "SELECT to_regclass('public.alerts') AS table_name"
+            ).fetchone()
+        if not row or not row["table_name"]:
+            raise RuntimeError(
+                "PostgreSQL schema is not initialized. "
+                "Run `python -m alembic upgrade head` with "
+                "MIGRATION_DATABASE_URL before starting the backend."
+            )
+        _POSTGRES_SCHEMA_READY = True
+        return
     with _conn() as conn:
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS alerts (
                 id TEXT PRIMARY KEY,
+                alert_no TEXT NOT NULL,
                 title TEXT NOT NULL,
                 source_category TEXT NOT NULL DEFAULT 'other',
                 source_system TEXT,
@@ -375,6 +443,11 @@ def init_db() -> None:
                 normalized_fields TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS app_sequences (
+                name TEXT PRIMARY KEY,
+                value INTEGER NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS attachments (
@@ -482,6 +555,8 @@ def init_db() -> None:
             conn.execute(
                 "ALTER TABLE alerts ADD COLUMN source_category TEXT NOT NULL DEFAULT 'other'"
             )
+        if "alert_no" not in columns:
+            conn.execute("ALTER TABLE alerts ADD COLUMN alert_no TEXT")
         if "key_evidence" not in columns:
             conn.execute("ALTER TABLE alerts ADD COLUMN key_evidence TEXT")
         if "evidence_info" not in columns:
@@ -492,6 +567,25 @@ def init_db() -> None:
             conn.execute("ALTER TABLE alerts ADD COLUMN handlers TEXT")
         if "round" not in columns:
             conn.execute("ALTER TABLE alerts ADD COLUMN round INTEGER NOT NULL DEFAULT 1")
+        conn.execute(
+            "INSERT OR IGNORE INTO app_sequences (name, value) VALUES (?, ?)",
+            ("alert_number", 0),
+        )
+        missing_numbers = conn.execute(
+            "SELECT id, created_at FROM alerts "
+            "WHERE alert_no IS NULL OR alert_no = '' "
+            "ORDER BY created_at, id"
+        ).fetchall()
+        for row in missing_numbers:
+            alert_no = _next_alert_no(conn, row["created_at"])
+            conn.execute(
+                "UPDATE alerts SET alert_no = ? WHERE id = ?",
+                (alert_no, row["id"]),
+            )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_alerts_alert_no "
+            "ON alerts(alert_no)"
+        )
         note_columns = {row["name"] for row in conn.execute("PRAGMA table_info(notes)")}
         if "round" not in note_columns:
             conn.execute("ALTER TABLE notes ADD COLUMN round INTEGER NOT NULL DEFAULT 1")
@@ -530,6 +624,8 @@ def _row_to_attachment(row: sqlite3.Row) -> Dict[str, Any]:
     item = dict(row)
     item["url"] = f"/api/incident/files/{item['rel_path'].replace(os.sep, '/')}"
     item["upload_time"] = item.get("uploaded_at")
+    full_path = resolve_file_path(item["rel_path"])
+    item["file_available"] = bool(full_path and full_path.is_file())
     return item
 
 
@@ -789,17 +885,19 @@ def create_alert(raw: Dict[str, Any], actor: str = DEFAULT_ACTOR) -> Dict[str, A
     normalized_fields = normalized_alert["normalized_fields"]
 
     with _conn() as conn:
+        alert_no = _next_alert_no(conn, now)
         conn.execute(
             """
             INSERT INTO alerts (
-                id, title, source_category, source_system, source_product, alert_type, severity, status,
+                id, alert_no, title, source_category, source_system, source_product, alert_type, severity, status,
                 conclusion, close_reason, owner, created_by, updated_by, occurred_at,
                 discovered_at, description, key_evidence, handling_suggestion,
                 raw_content, normalized_fields, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 alert_id,
+                alert_no,
                 normalized_alert["title"],
                 normalized_alert["source_category"],
                 normalized_alert["source_system"],
@@ -831,7 +929,17 @@ def create_alert(raw: Dict[str, Any], actor: str = DEFAULT_ACTOR) -> Dict[str, A
             if isinstance(attachment, dict) and attachment.get("url"):
                 _insert_external_attachment(conn, alert_id, attachment, actor)
 
-    _audit("create_alert", "alert", alert_id, actor, after={"id": alert_id, "title": normalized_alert["title"]})
+    _audit(
+        "create_alert",
+        "alert",
+        alert_id,
+        actor,
+        after={
+            "id": alert_id,
+            "alert_no": alert_no,
+            "title": normalized_alert["title"],
+        },
+    )
     add_note(alert_id, "告警已创建", "system", actor, audit=False)
     return get_alert(alert_id) or {}
 
@@ -948,13 +1056,18 @@ def list_alerts(filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]
         clauses.append("status = ?")
         params.append("closed")
 
-    keyword = filters.get("keyword")
+    keyword = str(filters.get("keyword") or "").strip()
     if keyword:
-        clauses.append(
-            "(title LIKE ? OR source_system LIKE ? OR description LIKE ? OR normalized_fields LIKE ? OR raw_content LIKE ?)"
-        )
-        like = f"%{keyword}%"
-        params.extend([like, like, like, like, like])
+        if re.fullmatch(r"SOC-\d{8}-\d+", keyword, flags=re.I):
+            clauses.append("alert_no = ?")
+            params.append(keyword.upper())
+        else:
+            clauses.append(
+                "(alert_no LIKE ? OR title LIKE ? OR source_system LIKE ? "
+                "OR description LIKE ? OR normalized_fields LIKE ? OR raw_content LIKE ?)"
+            )
+            like = f"%{keyword}%"
+            params.extend([like, like, like, like, like, like])
 
     # 授权可见性过滤(与研判逻辑无关):仅当调用方显式传入 restrict_to_actor 时生效,
     # 把结果限制为该账号「经手/受指派」的告警(owner/created_by/handlers/子任务负责人)。
@@ -2231,7 +2344,8 @@ def export_alert(alert_id: str, fmt: str = "json") -> Optional[Any]:
             f"# {alert.get('title') or '告警研判报告'}",
             "",
             "## 基本信息",
-            f"- ID: {alert['id']}",
+            f"- 告警编号: {alert.get('alert_no') or '-'}",
+            f"- 内部 ID: {alert['id']}",
             f"- 来源系统: {alert.get('source_system') or '-'}",
             f"- 类型: {alert.get('alert_type') or '-'}",
             f"- 严重等级: {alert.get('severity')}",
