@@ -170,15 +170,18 @@ def test_legacy_updater_validates_candidate_before_forward_only_activation():
         'systemctl stop "$SERVICE_NAME"', candidate_preflight
     )
     live_checkout = script.index(
-        'git -C "$APP_DIR" checkout --detach "$TARGET_COMMIT"'
+        'git -c core.filemode=false -C "$APP_DIR"',
+        maintenance_stop,
     )
 
     assert candidate_test < wheelhouse < candidate_preflight < maintenance_stop
     assert maintenance_stop < live_checkout
+    assert 'checkout --detach "$TARGET_COMMIT"' in script[live_checkout:]
     assert 'git -C "$APP_DIR" checkout --detach "$OLD_COMMIT"' not in script
     assert "rollback_legacy_checkout" not in script
     assert "Automatic rollback is disabled" in script
     assert "legacy_update=resume" in script
+    assert '"$CURRENT_HEAD" == "$OLD_COMMIT"' in script
     assert 'START_NEW_UPDATE="${START_NEW_UPDATE:-0}"' in script
     assert 'safe_remove_candidate' in script
     assert 'safe_remove_wheelhouse' in script

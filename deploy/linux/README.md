@@ -519,3 +519,8 @@ git -C /opt/soc-workbench status --short
 权限修复的新脚本再续跑。新脚本把部署用户需要读写的临时依赖缓存放在固定候选目录的
 `venv/.activation-wheelhouse` 中；`/var/lib/soc-workbench/deploy` 只保存由 root
 维护的状态和日志，无需放宽父目录权限，也无需删除已有状态。
+
+如果旧环境曾对 `deploy/linux/*.sh` 执行 `chmod 0750`，Git 可能把权限位识别为本地
+修改。更新脚本在工作区检查和正式 checkout 时统一使用 `core.filemode=false`：仅忽略
+文件可执行权限差异，真实内容修改仍会阻止切换。步骤60在 checkout 前失败时，续跑
+允许正式目录仍位于记录的旧提交；checkout 已成功后失败时则复用目标提交。

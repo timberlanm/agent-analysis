@@ -392,7 +392,9 @@ sudo -u "$SERVICE_USER" test -r "$SERVICE_ENV" ||
 if [[ $RESUME_UPDATE -eq 1 &&
     ($PRIOR_FAILED_STEP -ge 60 || "$PRIOR_ACTIVATION_STARTED" == "True" || "$PRIOR_ACTIVATION_STARTED" == "true") ]] ||
     [[ $RECOVERY_MODE -eq 1 ]]; then
-    [[ "$CURRENT_HEAD" == "$TARGET_COMMIT" || $RECOVERY_MODE -eq 1 ]] ||
+    [[ "$CURRENT_HEAD" == "$TARGET_COMMIT" ||
+        "$CURRENT_HEAD" == "$OLD_COMMIT" ||
+        $RECOVERY_MODE -eq 1 ]] ||
         fail "The failed activation checkout changed unexpectedly: $CURRENT_HEAD"
     log "Activation recovery mode: an inactive service is allowed"
 else
@@ -582,7 +584,8 @@ else
     systemctl stop "$SERVICE_NAME"
 
     if [[ "$CURRENT_HEAD" != "$TARGET_COMMIT" ]]; then
-        run_as_deploy git -C "$APP_DIR" checkout --detach "$TARGET_COMMIT"
+        run_as_deploy git -c core.filemode=false -C "$APP_DIR" \
+            checkout --detach "$TARGET_COMMIT"
     else
         log "The formal checkout already uses target $TARGET_COMMIT"
     fi
