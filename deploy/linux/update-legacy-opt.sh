@@ -43,6 +43,7 @@ LAST_COMPLETED_STEP=0
 OLD_COMMIT=""
 TARGET_COMMIT=""
 SERVICE_USER=""
+DEPLOY_GROUP=""
 FAILURE_REASON=""
 FAILED_COMMAND=""
 FAILED_LINE=""
@@ -312,6 +313,9 @@ START_NEW_UPDATE="$(normalize_boolean "$START_NEW_UPDATE")"
     fail "Run through sudo from the deployment login user, or set DEPLOY_USER explicitly"
 id "$DEPLOY_USER" >/dev/null 2>&1 ||
     fail "Deployment user does not exist: $DEPLOY_USER"
+DEPLOY_GROUP="$(id -gn "$DEPLOY_USER")"
+[[ -n "$DEPLOY_GROUP" ]] ||
+    fail "Cannot determine the primary group for deployment user: $DEPLOY_USER"
 
 [[ -d "$APP_DIR/.git" ]] ||
     fail "$APP_DIR is not a Git checkout; this updater requires the repaired Git-based test environment"
@@ -334,7 +338,7 @@ EXEC_START="$(systemctl show "$SERVICE_NAME" -p ExecStart --value)"
 [[ "$EXEC_START" == *"$VENV_DIR/"* ]] ||
     fail "The systemd service does not use the expected legacy venv: $VENV_DIR"
 
-install -d -o root -g root -m 0750 "$STATE_DIR"
+install -d -o root -g "$DEPLOY_GROUP" -m 0750 "$STATE_DIR"
 touch "$UPDATE_LOG"
 chmod 0640 "$UPDATE_LOG"
 exec > >(tee -a "$UPDATE_LOG") 2>&1

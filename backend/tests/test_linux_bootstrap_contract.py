@@ -143,6 +143,12 @@ def test_legacy_updater_is_isolated_to_the_current_opt_test_layout():
     assert 'CANDIDATE_DIR="/opt/soc-workbench-update-candidate"' in script
     assert 'run_as_deploy git ls-remote "$REPO_URL"' in script
     assert 'STATE_FILE="$STATE_DIR/update-legacy-state.json"' in script
+    assert 'DEPLOY_GROUP="$(id -gn "$DEPLOY_USER")"' in script
+    assert (
+        'install -d -o root -g "$DEPLOY_GROUP" -m 0750 "$STATE_DIR"'
+        in script
+    )
+    assert 'install -d -o root -g root -m 0750 "$STATE_DIR"' not in script
     assert "git reset --hard" not in script
     assert "before-git" not in script
     assert ".failed." not in script
