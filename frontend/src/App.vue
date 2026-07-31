@@ -86,7 +86,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, reactive, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import {
@@ -94,7 +94,7 @@ import {
 } from '@element-plus/icons-vue'
 import { auth } from './store/auth'
 import { authChangePassword } from './api'
-import { clearSessionResume, safeInternalPath, saveSessionResume } from './utils/sessionResume'
+import { clearSessionResume, peekSessionResume, safeInternalPath, saveSessionResume } from './utils/sessionResume'
 import AdminUsers from './components/AdminUsers.vue'
 import AuditLog from './components/AuditLog.vue'
 
@@ -154,14 +154,30 @@ async function submitChangePassword() {
 
 // ---- 会话失效 -> 回登录页 ----
 let handlingUnauthorized = false
-function handleUnauthorized() {
+async function handleUnauthorized() {
   if (route.meta.public || handlingUnauthorized) return
   handlingUnauthorized = true
 
   const resumeCapture = {
-    viewState: null,
+    viewState: {
+      version: 2,
+      app: {
+        changePasswordOpen: pwVisible.value,
+        adminOpen: adminVisible.value,
+        auditOpen: auditVisible.value,
+      },
+    },
+    persistence: [],
     setViewState(value) {
-      if (value && typeof value === 'object') this.viewState = value
+      if (!value || typeof value !== 'object') return
+      const key = value.kind || 'page'
+      this.viewState[key] = value
+    },
+    mergeViewState(key, value) {
+      if (key && value && typeof value === 'object') this.viewState[key] = value
+    },
+    addPersistence(promise) {
+      if (promise && typeof promise.then === 'function') this.persistence.push(promise)
     },
   }
   window.dispatchEvent(new CustomEvent('capture-session-resume', { detail: resumeCapture }))
@@ -172,12 +188,37 @@ function handleUnauthorized() {
     path: redirect,
     viewState: resumeCapture.viewState,
   })
+  if (resumeCapture.persistence.length) {
+    const results = await Promise.allSettled(resumeCapture.persistence)
+    if (results.some(item => item.status === 'rejected' || item.value === false)) {
+      ElMessage.error('本地文件恢复快照保存失败；重新登录后请核对待上传附件')
+    }
+  }
   auth._clear()
   ElMessage.warning('登录已失效，请重新登录')
   router.replace({ path: '/login', query: { redirect } })
     .finally(() => { handlingUnauthorized = false })
 }
-onMounted(() => window.addEventListener('auth-unauthorized', handleUnauthorized))
+
+function restoreAppResume() {
+  if (route.meta.public || !auth.username) return
+  const resume = peekSessionResume(auth.username)
+  const state = resume?.viewState?.app
+  if (!state || typeof state !== 'object') return
+  pwVisible.value = !!state.changePasswordOpen
+  adminVisible.value = !!state.adminOpen
+  auditVisible.value = !!state.auditOpen
+  // Passwords are deliberately never persisted.
+  pwForm.old = ''
+  pwForm.neo = ''
+  pwForm.confirm = ''
+}
+
+watch(() => route.fullPath, restoreAppResume)
+onMounted(() => {
+  window.addEventListener('auth-unauthorized', handleUnauthorized)
+  restoreAppResume()
+})
 onBeforeUnmount(() => window.removeEventListener('auth-unauthorized', handleUnauthorized))
 </script>
 

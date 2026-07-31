@@ -179,7 +179,7 @@
 </template>
 
 <script setup>
-import { ref, reactive } from 'vue'
+import { ref, reactive, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
 import {
@@ -187,6 +187,8 @@ import {
   listApiTokens, createApiToken, revokeApiToken,
   getRolePermissions, setRolePermissions,
 } from '../api'
+import { peekSessionResume } from '../utils/sessionResume'
+import { auth } from '../store/auth'
 
 defineProps({ modelValue: { type: Boolean, default: false } })
 const emit = defineEmits(['update:modelValue'])
@@ -221,6 +223,75 @@ const editMatrix = reactive({})
 const permLoading = ref(false)
 const permSaving = ref(false)
 const adminOnlyPermissions = new Set(['alert.delete', 'system.manage', 'data.clear'])
+let pendingResume = null
+
+function captureSessionResume(event) {
+  const merge = event?.detail?.mergeViewState
+  if (typeof merge !== 'function') return
+  const matrix = {}
+  for (const [role, values] of Object.entries(editMatrix)) {
+    matrix[role] = { ...values }
+  }
+  merge.call(event.detail, 'admin', {
+    activeTab: activeTab.value,
+    createOpen: createVisible.value,
+    createForm: {
+      username: createForm.username,
+      display_name: createForm.display_name,
+      roles: [...createForm.roles],
+      must_change: createForm.must_change,
+    },
+    rolesOpen: rolesVisible.value,
+    editingUserId: editing.value?.id || '',
+    editRoles: [...editRoles.value],
+    tokenCreateOpen: tokenCreateVisible.value,
+    tokenForm: {
+      name: tokenForm.name,
+      scopes: [...tokenForm.scopes],
+      expires_days: tokenForm.expires_days,
+    },
+    permissionMatrix: matrix,
+  })
+}
+
+function restoreSessionResume() {
+  const state = peekSessionResume(auth.username)?.viewState?.admin
+  if (state) pendingResume = state
+}
+
+function applyPendingResume() {
+  const state = pendingResume
+  if (!state) return
+  if (['users', 'tokens', 'perms'].includes(state.activeTab)) activeTab.value = state.activeTab
+  if (state.createForm) {
+    createForm.username = String(state.createForm.username || '')
+    createForm.display_name = String(state.createForm.display_name || '')
+    createForm.password = ''
+    createForm.roles = Array.isArray(state.createForm.roles) ? state.createForm.roles.map(String) : []
+    createForm.must_change = state.createForm.must_change !== false
+  }
+  createVisible.value = !!state.createOpen
+  if (state.editingUserId) {
+    editing.value = users.value.find(item => String(item.id) === String(state.editingUserId)) || null
+    editRoles.value = Array.isArray(state.editRoles) ? state.editRoles.map(String) : []
+    rolesVisible.value = !!state.rolesOpen && !!editing.value
+  }
+  if (state.tokenForm) {
+    tokenForm.name = String(state.tokenForm.name || '')
+    tokenForm.scopes = Array.isArray(state.tokenForm.scopes) ? state.tokenForm.scopes.map(String) : []
+    tokenForm.expires_days = Number(state.tokenForm.expires_days) || 90
+  }
+  tokenCreateVisible.value = !!state.tokenCreateOpen
+  if (state.permissionMatrix && typeof state.permissionMatrix === 'object') {
+    for (const [role, values] of Object.entries(state.permissionMatrix)) {
+      if (!editMatrix[role] || !values || typeof values !== 'object') continue
+      for (const [permission, enabled] of Object.entries(values)) {
+        if (permission in editMatrix[role]) editMatrix[role][permission] = !!enabled
+      }
+    }
+  }
+  pendingResume = null
+}
 
 function fmt(iso) {
   if (!iso) return ''
@@ -230,10 +301,9 @@ function fmt(iso) {
 function statusLabel(s) { return { active: '正常', disabled: '停用', locked: '锁定' }[s] || s }
 function statusType(s) { return { active: 'success', disabled: 'info', locked: 'warning' }[s] || 'info' }
 
-function onOpen() {
-  loadUsers()
-  loadTokens()
-  loadPerms()
+async function onOpen() {
+  await Promise.all([loadUsers(), loadTokens(), loadPerms()])
+  applyPendingResume()
 }
 
 async function loadPerms() {
@@ -433,6 +503,12 @@ async function revokeToken(row) {
     if (e !== 'cancel') ElMessage.error(e.message || '吊销失败')
   }
 }
+
+onMounted(() => {
+  window.addEventListener('capture-session-resume', captureSessionResume)
+  restoreSessionResume()
+})
+onBeforeUnmount(() => window.removeEventListener('capture-session-resume', captureSessionResume))
 </script>
 
 <style scoped>

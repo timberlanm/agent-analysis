@@ -179,6 +179,7 @@ export async function exportIncidentAuditCsv(params = {}) {
   }
   const qs = q.toString()
   const resp = await fetch(apiUrl(`/incident/audit/export${qs ? '?' + qs : ''}`), { credentials: 'include' })
+  if (resp.status === 401) notifyUnauthorized()
   const text = await resp.text()
   if (!resp.ok) throw new Error(text || '导出失败')
   return text
@@ -186,12 +187,14 @@ export async function exportIncidentAuditCsv(params = {}) {
 export function exportIncidentAlert(id) { return request(`/incident/alerts/${id}/export`) }
 export async function exportIncidentAlertMarkdown(id) {
   const resp = await fetch(apiUrl(`/incident/alerts/${id}/export?format=markdown`), { credentials: 'include' })
+  if (resp.status === 401) notifyUnauthorized()
   const text = await resp.text()
   if (!resp.ok) throw new Error(text || '导出失败')
   return text
 }
 export async function exportIncidentOperationsCsv(days = 7) {
   const resp = await fetch(apiUrl(`/incident/operations/export?days=${days}`), { credentials: 'include' })
+  if (resp.status === 401) notifyUnauthorized()
   const text = await resp.text()
   if (!resp.ok) throw new Error(text || '导出失败')
   return text
@@ -204,6 +207,7 @@ export async function uploadIncidentAttachments(alertId, files, description = ''
   const resp = await fetch(apiUrl(`/incident/alerts/${alertId}/attachments`), {
     method: 'POST', body: form, credentials: 'include', headers: csrfHeaders(),
   })
+  if (resp.status === 401) notifyUnauthorized()
   const data = await resp.json()
   if (!resp.ok) throw new Error(data.error || '上传失败')
   return data
@@ -251,6 +255,7 @@ export async function uploadIncidentImage(file) {
   const resp = await fetch(apiUrl('/incident/upload_image'), {
     method: 'POST', body: form, credentials: 'include', headers: csrfHeaders(),
   })
+  if (resp.status === 401) notifyUnauthorized()
   const data = await resp.json()
   if (!resp.ok) throw new Error(data.error || '上传失败')
   return data
@@ -261,6 +266,7 @@ export async function uploadIncidentAlertFile(file) {
   const resp = await fetch(apiUrl('/incident/upload_alert'), {
     method: 'POST', body: form, credentials: 'include', headers: csrfHeaders(),
   })
+  if (resp.status === 401) notifyUnauthorized()
   const data = await resp.json()
   if (!resp.ok) throw new Error(data.error || '上传失败')
   return data

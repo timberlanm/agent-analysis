@@ -534,6 +534,23 @@ export default { name: 'Incident' }
       </el-dialog>
     </div>
 
+    <el-dialog v-model="batchNoteDialogVisible" title="批量备注" width="520px" :close-on-click-modal="false">
+      <el-input
+        v-model="batchNoteDraft"
+        type="textarea"
+        :rows="6"
+        maxlength="20000"
+        show-word-limit
+        placeholder="记录统一处理说明"
+      />
+      <template #footer>
+        <el-button @click="batchNoteDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="batchLoading" :disabled="!batchNoteDraft.trim()" @click="submitBatchNote">
+          确认
+        </el-button>
+      </template>
+    </el-dialog>
+
     <el-dialog
       v-model="createDialogVisible"
       width="90vw"
@@ -884,7 +901,8 @@ import {
 } from '../api'
 import { auth } from '../store/auth'
 import { validateIncidentFiles } from '../utils/incidentFileValidation'
-import { consumeSessionResume } from '../utils/sessionResume'
+import { clearSessionResume, peekSessionResume } from '../utils/sessionResume'
+import { clearSessionDraft, peekSessionDraft, saveSessionDraft } from '../utils/sessionDraft'
 import { shouldIgnoreRowClick } from '../utils/tableInteraction'
 
 // 按权限显隐/禁用操作入口（后端仍是强制校验，前端仅做体验）
@@ -945,6 +963,7 @@ const responderHint = ref(false)
 const statusPulse = ref(false)
 // 研判三框待加入的暂存截图（点“确认”时随文字一并落库）：{ file, preview }
 const researchPending = ref({ key_evidence: [], handling_suggestion: [] })
+const researchSubmission = ref({ key_evidence: null, handling_suggestion: null })
 // 研判三框折叠（默认收起，正文看研判记录；折叠状态记忆到 localStorage）
 const researchCollapsed = ref(localStorage.getItem('research_collapsed') !== '0')
 // 应急响应处置子任务（轻量）
@@ -956,6 +975,8 @@ const subtaskStatusOptions = [
   { value: 'done', label: '已完成' }
 ]
 const batchForm = ref({ owner: '', severity: '', status: '' })
+const batchNoteDialogVisible = ref(false)
+const batchNoteDraft = ref('')
 const entityForm = ref({ entity_type: 'ip', value: '' })
 const attachmentInputRef = ref(null)
 const createAttachmentInputRef = ref(null)
@@ -973,6 +994,8 @@ const assignSubmitting = ref(false)
 const handlersModel = ref([])
 const createFiles = ref([])
 const createScreenshotSlots = ref([])
+const pendingEvidenceUploads = ref([])
+const pendingQuickCreates = ref([])
 const selectedOptionalFieldKeys = ref([])
 const createDialogVisible = ref(false)
 const editingAlertId = ref(null)
@@ -1011,19 +1034,69 @@ function captureSessionResume(event) {
     selectedAlertId: selectedAlert.value?.id || '',
     detailOpen: detailDialogVisible.value,
     researchCollapsed: researchCollapsed.value,
+    selectedAlertIds: selectedAlertIds.value,
+    batchForm: { ...batchForm.value },
+    batchNoteOpen: batchNoteDialogVisible.value,
+    batchNoteDraft: String(batchNoteDraft.value || '').slice(0, 20000),
     researchInputs: {
       key_evidence: String(researchInputs.value.key_evidence || '').slice(0, 20000),
       handling_suggestion: String(researchInputs.value.handling_suggestion || '').slice(0, 20000),
     },
+    researchSubmission: {
+      key_evidence: researchSubmission.value.key_evidence,
+      handling_suggestion: researchSubmission.value.handling_suggestion,
+    },
+    subtaskAdding: subtaskAdding.value,
+    subtaskForm: { ...subtaskForm.value },
+    assignOpen: assignDialogVisible.value,
+    assignTargetId: assignTarget.value?.id || '',
+    assignNewHandler: [...assignNewHandler.value],
+    rejectOpen: rejectDialogVisible.value,
+    rejectReason: String(rejectReason.value || '').slice(0, 20000),
+    reopenOpen: reopenDialogVisible.value,
+    reopenForm: { ...reopenForm.value },
+    createOpen: createDialogVisible.value,
+    createFullscreen: createDialogFullscreen.value,
+    editingAlertId: editingAlertId.value || '',
+    editingStatus: editingStatus.value || '',
+    reportTime: reportTime.value || '',
+    selectedOptionalFieldKeys: [...selectedOptionalFieldKeys.value],
+    createForm: { ...createForm.value },
+    createScreenshotSlotIds: createScreenshotSlots.value.map(slot => slot.id),
     queueScrollTop: opsScrollEl?.scrollTop || 0,
     detailScrollTop: detailScrollEl?.scrollTop || 0,
   })
+
+  const addPersistence = event?.detail?.addPersistence
+  if (typeof addPersistence === 'function') {
+    addPersistence.call(event.detail, saveSessionDraft(auth.username, {
+      kind: 'incident',
+      createFiles: [...createFiles.value],
+      createScreenshots: createScreenshotSlots.value.map(slot => ({
+        id: slot.id,
+        file: slot.file || null,
+      })),
+      researchPending: Object.fromEntries(
+        Object.entries(researchPending.value).map(([key, items]) => [
+          key,
+          items.map(item => item.file).filter(Boolean),
+        ])
+      ),
+      pendingEvidenceUploads: [...pendingEvidenceUploads.value],
+      pendingQuickCreates: pendingQuickCreates.value.map(item => ({
+        file: item.file,
+        alertId: item.alertId || '',
+      })),
+    }))
+  }
 }
 
 async function restoreSessionResume() {
-  const resume = consumeSessionResume(auth.username)
-  const state = resume?.viewState
+  const resume = peekSessionResume(auth.username)
+  const state = resume?.viewState?.incident
+    || (resume?.viewState?.kind === 'incident' ? resume.viewState : null)
   if (!state || state.kind !== 'incident') return false
+  const fileState = await peekSessionDraft(auth.username)
 
   if (state.filters && typeof state.filters === 'object') {
     for (const key of resumableFilterKeys) {
@@ -1040,6 +1113,15 @@ async function restoreSessionResume() {
   if (typeof state.researchCollapsed === 'boolean') {
     researchCollapsed.value = state.researchCollapsed
   }
+  if (state.batchForm && typeof state.batchForm === 'object') {
+    batchForm.value = {
+      owner: String(state.batchForm.owner || ''),
+      severity: String(state.batchForm.severity || ''),
+      status: String(state.batchForm.status || ''),
+    }
+  }
+  batchNoteDraft.value = String(state.batchNoteDraft || '').slice(0, 20000)
+  batchNoteDialogVisible.value = !!state.batchNoteOpen
 
   await refreshAll()
 
@@ -1051,9 +1133,106 @@ async function restoreSessionResume() {
         handling_suggestion: String(state.researchInputs.handling_suggestion || '').slice(0, 20000),
       }
     }
+    if (state.researchSubmission && typeof state.researchSubmission === 'object') {
+      for (const key of Object.keys(researchSubmission.value)) {
+        const item = state.researchSubmission[key]
+        researchSubmission.value[key] = item && typeof item === 'object'
+          ? {
+              text: String(item.text || '').slice(0, 20000),
+              urls: Array.isArray(item.urls) ? item.urls.map(String) : [],
+            }
+          : null
+      }
+    }
+    subtaskAdding.value = !!state.subtaskAdding
+    if (state.subtaskForm && typeof state.subtaskForm === 'object') {
+      subtaskForm.value = {
+        title: String(state.subtaskForm.title || '').slice(0, 1000),
+        team: String(state.subtaskForm.team || '').slice(0, 500),
+        assignee: String(state.subtaskForm.assignee || '').slice(0, 500),
+      }
+    }
+    if (fileState?.researchPending) {
+      for (const key of Object.keys(researchPending.value)) {
+        const files = Array.isArray(fileState.researchPending[key])
+          ? fileState.researchPending[key].filter(Boolean)
+          : []
+        researchPending.value[key] = files.map(file => ({
+          file,
+          preview: URL.createObjectURL(file),
+        }))
+      }
+    }
   }
 
+  if (state.createOpen) {
+    cleanupCreateAssets()
+    createForm.value = { ...newCreateForm(), ...(state.createForm || {}) }
+    selectedOptionalFieldKeys.value = Array.isArray(state.selectedOptionalFieldKeys)
+      ? state.selectedOptionalFieldKeys.filter(
+          key => optionalFieldDefinitions.some(item => item.key === key)
+        )
+      : []
+    editingAlertId.value = String(state.editingAlertId || '') || null
+    editingStatus.value = String(state.editingStatus || '')
+    reportTime.value = String(state.reportTime || '')
+    createDialogFullscreen.value = !!state.createFullscreen
+
+    if (editingAlertId.value) {
+      try {
+        const original = await getIncidentAlert(editingAlertId.value)
+        if (original.success) editOriginal.value = original.data
+      } catch (_) {}
+    }
+
+    const storedScreenshots = Array.isArray(fileState?.createScreenshots)
+      ? fileState.createScreenshots
+      : []
+    const slotIds = Array.isArray(state.createScreenshotSlotIds)
+      ? state.createScreenshotSlotIds
+      : storedScreenshots.map(item => item.id)
+    createScreenshotSlots.value = slotIds.map((id) => {
+      const file = storedScreenshots.find(item => item.id === id)?.file || null
+      return { id, file, previewUrl: file ? URL.createObjectURL(file) : '' }
+    })
+    if (!createScreenshotSlots.value.length) createScreenshotSlots.value = [newScreenshotSlot()]
+    createFiles.value = Array.isArray(fileState?.createFiles)
+      ? fileState.createFiles.filter(Boolean)
+      : []
+    createDialogVisible.value = true
+  }
+
+  if (state.assignOpen && state.assignTargetId) {
+    try {
+      const target = selectedAlert.value?.id === state.assignTargetId
+        ? selectedAlert.value
+        : (await getIncidentAlert(state.assignTargetId)).data
+      if (target) {
+        assignTarget.value = target
+        assignNewHandler.value = Array.isArray(state.assignNewHandler)
+          ? state.assignNewHandler.map(String)
+          : []
+        assignDialogVisible.value = true
+      }
+    } catch (_) {}
+  }
+  rejectReason.value = String(state.rejectReason || '').slice(0, 20000)
+  rejectDialogVisible.value = !!state.rejectOpen && !!selectedAlert.value
+  if (state.reopenForm && typeof state.reopenForm === 'object') {
+    reopenForm.value = {
+      conclusion: String(state.reopenForm.conclusion || ''),
+      reason: String(state.reopenForm.reason || '').slice(0, 20000),
+    }
+  }
+  reopenDialogVisible.value = !!state.reopenOpen && !!selectedAlert.value
+
   await nextTick()
+  if (Array.isArray(state.selectedAlertIds) && alertTableRef.value) {
+    const wanted = new Set(state.selectedAlertIds.map(String))
+    for (const row of alerts.value) {
+      if (wanted.has(String(row.id))) alertTableRef.value.toggleRowSelection(row, true)
+    }
+  }
   bindQueueScroll()
   if (opsScrollEl && Number.isFinite(Number(state.queueScrollTop))) {
     opsScrollEl.scrollTop = Math.max(0, Number(state.queueScrollTop))
@@ -1063,6 +1242,32 @@ async function restoreSessionResume() {
     if (detailScrollEl && Number.isFinite(Number(state.detailScrollTop))) {
       detailScrollEl.scrollTop = Math.max(0, Number(state.detailScrollTop))
     }
+  }
+  const retryEvidence = Array.isArray(fileState?.pendingEvidenceUploads)
+    ? fileState.pendingEvidenceUploads.filter(Boolean)
+    : []
+  const retryQuickCreates = Array.isArray(fileState?.pendingQuickCreates)
+    ? fileState.pendingQuickCreates.filter(item => item?.file)
+    : []
+  const hasResumedResearch = Object.values(researchSubmission.value).some(Boolean)
+  await clearSessionDraft(auth.username)
+  clearSessionResume()
+  if (state.createOpen) {
+    ElMessage.success('已恢复登录失效前的新建/编辑告警内容及待上传文件')
+  } else if (state.detailOpen) {
+    ElMessage.success('已恢复登录失效前的告警详情和未提交输入')
+  }
+  if (hasResumedResearch) {
+    ElMessage.warning('部分研判截图已上传但记录尚未完成，请点击“提交研判信息”继续')
+  }
+  if (retryEvidence.length && selectedAlert.value) {
+    ElMessage.info(`正在继续上传登录失效前选择的 ${retryEvidence.length} 个附件`)
+    await uploadFiles(retryEvidence)
+  }
+  if (retryQuickCreates.length) {
+    pendingQuickCreates.value = retryQuickCreates
+    ElMessage.info(`正在继续处理登录失效前的 ${retryQuickCreates.length} 个截图建单任务`)
+    await processQuickCreates()
   }
   return true
 }
@@ -1593,7 +1798,7 @@ function handleSelectionChange(rows) {
 }
 
 async function runBatch(action, payload, successText) {
-  if (!selectedAlertIds.value.length) return
+  if (!selectedAlertIds.value.length) return false
   batchLoading.value = true
   try {
     const res = await batchIncidentAlerts(selectedAlertIds.value, action, payload)
@@ -1605,8 +1810,10 @@ async function runBatch(action, payload, successText) {
       ElMessage.success(successText)
     }
     await refreshAll()
+    return true
   } catch (e) {
     ElMessage.error('批量操作失败: ' + e.message)
+    return false
   } finally {
     batchLoading.value = false
   }
@@ -1638,17 +1845,17 @@ async function batchChangeStatus() {
 }
 
 async function batchAddNote() {
-  try {
-    const { value } = await ElMessageBox.prompt('请输入批量备注内容', '批量备注', {
-      inputType: 'textarea',
-      inputPlaceholder: '记录统一处理说明',
-      confirmButtonText: '确认',
-      cancelButtonText: '取消'
-    })
-    const content = String(value || '').trim()
-    if (!content) return
-    await runBatch('note', { content, note_type: 'batch' }, '批量备注完成')
-  } catch {}
+  batchNoteDialogVisible.value = true
+}
+
+async function submitBatchNote() {
+  const content = batchNoteDraft.value.trim()
+  if (!content) return
+  const succeeded = await runBatch('note', { content, note_type: 'batch' }, '批量备注完成')
+  if (succeeded) {
+    batchNoteDraft.value = ''
+    batchNoteDialogVisible.value = false
+  }
 }
 
 async function selectAlert(row) {
@@ -1975,7 +2182,9 @@ function researchItemState(key) {
 // 是否有待提交的研判输入（文字或暂存截图）——无则提交按钮置灰
 const researchDirty = computed(() =>
   ['key_evidence', 'handling_suggestion'].some(
-    k => (researchInputs.value[k] || '').trim() || (researchPending.value[k] || []).length
+    k => (researchInputs.value[k] || '').trim()
+      || (researchPending.value[k] || []).length
+      || researchSubmission.value[k]
   )
 )
 
@@ -2195,31 +2404,40 @@ function handleResearchDrop(event, key = '') {
 
 // 记录单个研判项（上传暂存截图 + 更新快照列 + 追加研判记录），返回是否有新增
 async function recordResearchItem(id, key) {
-  const text = (researchInputs.value[key] || '').trim()
+  const resumedSubmission = researchSubmission.value[key]
+  const text = resumedSubmission?.text ?? (researchInputs.value[key] || '').trim()
   const pending = researchPending.value[key] || []
-  if (!text && !pending.length) return false
+  if (!text && !pending.length && !resumedSubmission) return false
   const label = RESEARCH_LABELS[key]
   const prevText = (selectedAlert.value?.[key] || '').trim()
-  // 上传暂存截图（打标记，证据面板据此排除）
-  const urls = []
-  for (const item of pending) {
-    const resp = await uploadIncidentAttachment(id, item.file, RESEARCH_SHOT_MARK)
-    const url = resp?.data?.attachments?.[0]?.url
-    if (url) urls.push(url)
+  // 批量上传并记录服务端 URL。后续写备注时即使会话失效，也不会重复上传已成功的截图。
+  let urls = Array.isArray(resumedSubmission?.urls) ? [...resumedSubmission.urls] : []
+  if (pending.length) {
+    const resp = await uploadIncidentAttachments(
+      id,
+      pending.map(item => item.file),
+      RESEARCH_SHOT_MARK
+    )
+    urls = [
+      ...urls,
+      ...(resp?.data?.attachments || []).map(item => item.url).filter(Boolean),
+    ]
+    clearStaged(key)
   }
+  researchSubmission.value[key] = { text, urls }
   // 文字快照写入字段（用于完成门控）
   if (text && text !== prevText) {
     const upd = await updateIncidentAlert(id, { [key]: text })
     if (!upd.success) throw new Error(`${label}保存失败`)
   }
   let recorded = false
-  if ((text && text !== prevText) || urls.length) {
+  if (resumedSubmission || (text && text !== prevText) || urls.length) {
     const header = text ? `${label}：${text}` : `${label} · 截图`
     const content = urls.length ? `${header}\n${urls.join('\n')}` : header
     await addIncidentNote(id, content, 'manual')
     recorded = true
   }
-  clearStaged(key)
+  researchSubmission.value[key] = null
   researchInputs.value[key] = ''
   return recorded
 }
@@ -2426,9 +2644,11 @@ async function refreshCorrelation() {
 async function uploadFiles(fileList) {
   const files = Array.from(fileList || [])
   if (!selectedAlert.value || files.length === 0) return
+  pendingEvidenceUploads.value = [...files]
   try {
     for (const file of files) {
       await uploadIncidentAttachment(selectedAlert.value.id, file)
+      pendingEvidenceUploads.value = pendingEvidenceUploads.value.filter(item => item !== file)
     }
     ElMessage.success(`已上传 ${files.length} 个附件`)
     await selectAlert(selectedAlert.value)
@@ -2457,6 +2677,34 @@ function onListDragLeave() {
   if (listDragDepth.value === 0) isListDragging.value = false
 }
 
+async function processQuickCreates() {
+  try {
+    let firstId = null
+    for (const item of [...pendingQuickCreates.value]) {
+      const file = item.file
+      const name = file.name.replace(/\.[^.]+$/, '') || '未命名'
+      if (!item.alertId) {
+        const res = await createIncidentAlert({
+          title: `截图告警 - ${name}`,
+          source_category: 'other',
+          source_system: '截图快速录入',
+          severity: 'medium',
+        })
+        if (!res.success) throw new Error(res.error || '快速建单失败')
+        item.alertId = res.data.id
+      }
+      if (!firstId) firstId = item.alertId
+      await uploadIncidentAttachment(item.alertId, file)
+      pendingQuickCreates.value = pendingQuickCreates.value.filter(entry => entry !== item)
+    }
+    ElMessage.success('截图快速建单完成')
+    await refreshAll()
+    if (firstId) await selectAlert({ id: firstId })
+  } catch (err) {
+    ElMessage.error('快速建单失败: ' + err.message)
+  }
+}
+
 async function handleListDrop(e) {
   isListDragging.value = false
   listDragDepth.value = 0
@@ -2465,27 +2713,8 @@ async function handleListDrop(e) {
     if (e.dataTransfer?.files?.length) ElMessage.warning('快速建单仅支持图片截图')
     return
   }
-  try {
-    let firstId = null
-    for (const file of files) {
-      const name = file.name.replace(/\.[^.]+$/, '') || '未命名'
-      const res = await createIncidentAlert({
-        title: `截图告警 - ${name}`,
-        source_category: 'other',
-        source_system: '截图快速录入',
-        severity: 'medium',
-      })
-      if (res.success) {
-        if (!firstId) firstId = res.data.id
-        await uploadIncidentAttachment(res.data.id, file)
-      }
-    }
-    ElMessage.success(`已根据截图创建 ${files.length} 条告警`)
-    await refreshAll()
-    if (firstId) await selectAlert({ id: firstId })
-  } catch (err) {
-    ElMessage.error('快速建单失败: ' + err.message)
-  }
+  pendingQuickCreates.value = files.map(file => ({ file, alertId: '' }))
+  await processQuickCreates()
 }
 
 async function removeAttachment(att) {

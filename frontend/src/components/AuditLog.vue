@@ -62,10 +62,12 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed } from 'vue'
+import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage } from 'element-plus'
 import { CircleCheck, Warning } from '@element-plus/icons-vue'
 import { getIncidentAudit, verifyIncidentAudit, exportIncidentAuditCsv } from '../api'
+import { auth } from '../store/auth'
+import { peekSessionResume } from '../utils/sessionResume'
 
 defineProps({ modelValue: { type: Boolean, default: false } })
 const emit = defineEmits(['update:modelValue'])
@@ -75,6 +77,32 @@ const loading = ref(false)
 const integrity = ref(null)
 const limit = 300
 const filters = reactive({ actor: '', action: '', keyword: '', range: null })
+
+function captureSessionResume(event) {
+  const merge = event?.detail?.mergeViewState
+  if (typeof merge !== 'function') return
+  merge.call(event.detail, 'audit', {
+    filters: {
+      actor: filters.actor,
+      action: filters.action,
+      keyword: filters.keyword,
+      range: Array.isArray(filters.range)
+        ? filters.range.map(value => new Date(value).toISOString())
+        : null,
+    },
+  })
+}
+
+function restoreSessionResume() {
+  const state = peekSessionResume(auth.username)?.viewState?.audit
+  if (!state?.filters) return
+  filters.actor = String(state.filters.actor || '')
+  filters.action = String(state.filters.action || '')
+  filters.keyword = String(state.filters.keyword || '')
+  filters.range = Array.isArray(state.filters.range) && state.filters.range.length === 2
+    ? state.filters.range.map(value => new Date(value))
+    : null
+}
 
 const ACTION_LABELS = {
   login: '登录', logout: '登出', login_failed: '登录失败', permission_denied: '鉴权拒绝',
@@ -183,6 +211,12 @@ async function exportCsv() {
     ElMessage.error(e.message || '导出失败')
   }
 }
+
+onMounted(() => {
+  window.addEventListener('capture-session-resume', captureSessionResume)
+  restoreSessionResume()
+})
+onBeforeUnmount(() => window.removeEventListener('capture-session-resume', captureSessionResume))
 </script>
 
 <style scoped>
