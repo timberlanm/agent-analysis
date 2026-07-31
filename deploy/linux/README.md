@@ -516,5 +516,6 @@ git -C /opt/soc-workbench status --short
 在正式切换阶段，服务会保持停止，避免未通过健康检查的新版本继续对外提供服务。
 
 如果旧版脚本曾显示部署用户无权访问 `/var/lib/soc-workbench/deploy`，请先获取包含
-权限修复的新脚本再续跑。新脚本会自动把该目录设置为 `root:<部署用户主组> 0750`，
-无需删除已有状态或候选目录。
+权限修复的新脚本再续跑。新脚本把部署用户需要读写的临时依赖缓存放在固定候选目录的
+`venv/.activation-wheelhouse` 中；`/var/lib/soc-workbench/deploy` 只保存由 root
+维护的状态和日志，无需放宽父目录权限，也无需删除已有状态。

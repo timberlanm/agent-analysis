@@ -35,7 +35,7 @@ STATE_FILE="$STATE_DIR/update-legacy-state.json"
 UPDATE_LOG="$STATE_DIR/update-legacy.log"
 FAILURE_LOG="$STATE_DIR/update-legacy-last-failure.log"
 HEALTH_RESPONSE="$STATE_DIR/update-legacy-health.json"
-WHEELHOUSE="$STATE_DIR/update-legacy-wheelhouse"
+WHEELHOUSE="$CANDIDATE_DIR/venv/.activation-wheelhouse"
 
 CURRENT_STEP=0
 CURRENT_STEP_NAME="startup"
@@ -43,7 +43,6 @@ LAST_COMPLETED_STEP=0
 OLD_COMMIT=""
 TARGET_COMMIT=""
 SERVICE_USER=""
-DEPLOY_GROUP=""
 FAILURE_REASON=""
 FAILED_COMMAND=""
 FAILED_LINE=""
@@ -211,10 +210,10 @@ safe_remove_candidate() {
 }
 
 safe_remove_wheelhouse() {
-    [[ "$WHEELHOUSE" == "$STATE_DIR/update-legacy-wheelhouse" ]] ||
+    [[ "$WHEELHOUSE" == "$CANDIDATE_DIR/venv/.activation-wheelhouse" ]] ||
         fail "Refusing to remove a nonstandard wheelhouse path"
-    [[ "$WHEELHOUSE" == "$RUNTIME_DIR"/deploy/* ]] ||
-        fail "Wheelhouse must remain inside the managed deploy directory"
+    [[ "$WHEELHOUSE" == "/opt/soc-workbench-update-candidate/"* ]] ||
+        fail "Wheelhouse must remain inside the fixed candidate directory"
     [[ ! -e "$WHEELHOUSE" ]] || rm -rf -- "$WHEELHOUSE"
 }
 
@@ -313,9 +312,6 @@ START_NEW_UPDATE="$(normalize_boolean "$START_NEW_UPDATE")"
     fail "Run through sudo from the deployment login user, or set DEPLOY_USER explicitly"
 id "$DEPLOY_USER" >/dev/null 2>&1 ||
     fail "Deployment user does not exist: $DEPLOY_USER"
-DEPLOY_GROUP="$(id -gn "$DEPLOY_USER")"
-[[ -n "$DEPLOY_GROUP" ]] ||
-    fail "Cannot determine the primary group for deployment user: $DEPLOY_USER"
 
 [[ -d "$APP_DIR/.git" ]] ||
     fail "$APP_DIR is not a Git checkout; this updater requires the repaired Git-based test environment"
@@ -338,7 +334,7 @@ EXEC_START="$(systemctl show "$SERVICE_NAME" -p ExecStart --value)"
 [[ "$EXEC_START" == *"$VENV_DIR/"* ]] ||
     fail "The systemd service does not use the expected legacy venv: $VENV_DIR"
 
-install -d -o root -g "$DEPLOY_GROUP" -m 0750 "$STATE_DIR"
+install -d -o root -g root -m 0750 "$STATE_DIR"
 touch "$UPDATE_LOG"
 chmod 0640 "$UPDATE_LOG"
 exec > >(tee -a "$UPDATE_LOG") 2>&1
