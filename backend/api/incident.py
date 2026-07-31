@@ -259,11 +259,18 @@ def get_alert_templates():
 @require_perm("alert.create")
 def create_alert():
     data = _json_body()
+    submission_mode = str(data.pop("submission_mode", "") or "").strip()
+    if submission_mode not in {"", "draft"}:
+        return jsonify({"success": False, "error": "新建告警仅支持保存草稿；正式创建请在附件上传后提交草稿"}), 400
     protected = {"status", "conclusion", "close_reason", "owner", "handlers", "created_by", "updated_by", "reporter", "attachments"}
     for field in protected:
         data.pop(field, None)
     try:
-        alert = incident_service.create_alert(data, actor=_actor())
+        alert = incident_service.create_alert(
+            data,
+            actor=_actor(),
+            initial_status="new" if submission_mode == "draft" else "pending",
+        )
         return jsonify({"success": True, "data": alert})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 400
@@ -295,7 +302,18 @@ def update_alert(alert_id):
     if not _scope_ok(existing, "alert.edit"):
         return _scope_forbidden()
     try:
-        alert = incident_service.update_alert(alert_id, _json_body(), actor=_actor())
+        data = _json_body()
+        submission_mode = str(data.pop("submission_mode", "") or "").strip()
+        if submission_mode not in {"", "draft", "submit"}:
+            raise ValueError("提交方式无效")
+        if submission_mode and existing.get("status") != "new":
+            raise ValueError("只有创建中的告警可以保存草稿或正式提交")
+        alert = incident_service.update_alert(alert_id, data, actor=_actor())
+        if submission_mode == "submit":
+            incident_service.validate_alert_submission(alert_id)
+            alert = incident_service.set_status(
+                alert_id, "pending", actor=_actor(), reason="草稿正式提交"
+            )
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 400
     if not alert:
@@ -341,10 +359,19 @@ def upload_alert_attachment(alert_id):
     if not files:
         return jsonify({"success": False, "error": "未找到上传文件"}), 400
     description = request.form.get("description", "")
+    for file_storage in files:
+        _, err = incident_service.validate_attachment(file_storage)
+        if err:
+            return jsonify({
+                "success": False,
+                "error": f"{file_storage.filename or 'attachment'}：{err}",
+            }), 400
     uploaded = []
     for file_storage in files:
         info, err = incident_service.save_attachment(file_storage, alert_id, description, actor=_actor())
         if err:
+            for uploaded_item in uploaded:
+                incident_service.discard_attachment(uploaded_item["id"])
             return jsonify({"success": False, "error": err}), 400
         uploaded.append(info)
     return jsonify({"success": True, "data": {"attachments": uploaded}})

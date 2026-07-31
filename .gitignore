@@ -24,6 +24,10 @@ dist/
 pnpm-lock.yaml
 pnpm-workspace.yaml
 
+# Linux 离线安装介质由运维按目标 Ubuntu/Python/CPU 架构单独制作，不提交仓库
+deploy/offline/wheels/
+deploy/offline/debs/
+
 # IDE
 .vscode/
 .idea/

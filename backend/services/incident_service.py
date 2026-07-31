@@ -50,10 +50,11 @@ _POSTGRES_SCHEMA_READY = False
 
 ALLOWED_IMAGE_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 LOG_EXTENSIONS = {".json", ".txt", ".log", ".csv", ".out"}
-COMPRESSED_LOG_EXTENSIONS = {".gz", ".bz2", ".xz", ".zip"}
+COMPRESSED_LOG_EXTENSIONS = {".gz", ".bz2", ".xz"}
+ARCHIVE_EXTENSIONS = {".zip", ".rar"}
 PACKET_EXTENSIONS = {".pcap", ".pcapng"}
 ALLOWED_ATTACHMENT_EXT = (
-    ALLOWED_IMAGE_EXT | LOG_EXTENSIONS | COMPRESSED_LOG_EXTENSIONS | PACKET_EXTENSIONS
+    ALLOWED_IMAGE_EXT | LOG_EXTENSIONS | COMPRESSED_LOG_EXTENSIONS | ARCHIVE_EXTENSIONS | PACKET_EXTENSIONS
 )
 MAX_IMAGE_SIZE = 10 * 1024 * 1024
 MAX_LOG_SIZE = 200 * 1024 * 1024
@@ -73,7 +74,10 @@ COMPRESSED_MAGIC_HEADERS = {
     ".gz": (b"\x1f\x8b",),
     ".bz2": (b"BZh",),
     ".xz": (b"\xfd7zXZ\x00",),
+}
+ARCHIVE_MAGIC_HEADERS = {
     ".zip": (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08"),
+    ".rar": (b"Rar!\x1a\x07\x00", b"Rar!\x1a\x07\x01\x00"),
 }
 
 DEFAULT_ACTOR = "operator"
@@ -118,7 +122,7 @@ CORRELATION_FIELD_WEIGHTS = {
 }
 
 STATUS_VALUES = {
-    "new": "新建中",
+    "new": "创建中",
     "pending": "待分配",
     "assigned": "已分派",
     "triaging": "初筛中",
@@ -870,9 +874,15 @@ def extract_entities(raw: Any, normalized: Optional[Dict[str, Any]] = None) -> L
     return list(results.values())
 
 
-def create_alert(raw: Dict[str, Any], actor: str = DEFAULT_ACTOR) -> Dict[str, Any]:
+def create_alert(
+    raw: Dict[str, Any],
+    actor: str = DEFAULT_ACTOR,
+    initial_status: str = "pending",
+) -> Dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError("告警内容必须是 JSON 对象")
+    if initial_status not in {"new", "pending"}:
+        raise ValueError("初始状态只能是创建中或待分配")
     # 冗余自保：无论哪个入口调用，service 层自身始终剥离受保护字段，
     # 避免因调用方遗漏 pop 而导致客户端越权设置 owner/status/conclusion 等。
     # 各调用方的 pop 保留为额外加固，互不影响。
@@ -904,7 +914,7 @@ def create_alert(raw: Dict[str, Any], actor: str = DEFAULT_ACTOR) -> Dict[str, A
                 normalized_alert["source_product"],
                 normalized_alert["alert_type"],
                 normalized_alert["severity"],
-                raw.get("status") or "pending",
+                initial_status,
                 raw.get("conclusion") or "",
                 raw.get("close_reason") or "",
                 raw.get("owner") or "",
@@ -938,9 +948,11 @@ def create_alert(raw: Dict[str, Any], actor: str = DEFAULT_ACTOR) -> Dict[str, A
             "id": alert_id,
             "alert_no": alert_no,
             "title": normalized_alert["title"],
+            "status": initial_status,
         },
     )
-    add_note(alert_id, "告警已创建", "system", actor, audit=False)
+    note = "告警草稿已保存" if initial_status == "new" else "告警已创建"
+    add_note(alert_id, note, "system", actor, audit=False)
     return get_alert(alert_id) or {}
 
 
@@ -1133,6 +1145,33 @@ def get_alert(alert_id: str) -> Optional[Dict[str, Any]]:
             )
         ]
         return alert
+
+
+def validate_alert_submission(alert_id: str) -> Dict[str, Any]:
+    """正式提交草稿前，校验服务端最终保存的告警内容和截图。"""
+    alert = get_alert(alert_id)
+    if not alert:
+        raise ValueError("告警不存在")
+    normalized = alert.get("normalized_fields") or {}
+    required = [
+        (str(alert.get("title") or "").strip(), "告警名称"),
+        (str(alert.get("source_category") or "").strip(), "安全设备"),
+        (str(normalized.get("source_ip") or "").strip(), "攻击 IP"),
+        (str(normalized.get("destination_ip") or "").strip(), "被攻击 IP"),
+        (str(alert.get("created_by") or "").strip(), "上报人"),
+        (str(alert.get("description") or "").strip(), "告警详情"),
+    ]
+    missing = [label for value, label in required if not value]
+    if alert.get("title") == "未命名告警" and "告警名称" not in missing:
+        missing.insert(0, "告警名称")
+    if not any(
+        item.get("file_type") == "image" and item.get("file_available") is not False
+        for item in alert.get("attachments") or []
+    ):
+        missing.append("告警截图")
+    if missing:
+        raise ValueError("正式创建前请补全：" + "、".join(missing))
+    return alert
 
 
 _EDIT_FIELD_LABELS = {
@@ -1418,6 +1457,15 @@ def _attachment_policy(filename: str, sample: bytes) -> Tuple[Optional[Dict[str,
             "max_size": MAX_FORENSIC_FILE_SIZE,
         }, None
 
+    if ext in ARCHIVE_EXTENSIONS:
+        if not any(sample.startswith(header) for header in ARCHIVE_MAGIC_HEADERS[ext]):
+            return None, f"{ext} 压缩文件头校验失败"
+        return {
+            "file_type": "archive",
+            "subdir": "archives",
+            "max_size": MAX_FORENSIC_FILE_SIZE,
+        }, None
+
     if _is_log_filename(lower_name):
         if not _looks_like_text(sample):
             return None, "日志文件内容不是可识别的文本格式"
@@ -1434,11 +1482,46 @@ def _attachment_policy(filename: str, sample: bytes) -> Tuple[Optional[Dict[str,
             "max_size": MAX_LOG_SIZE,
         }, None
 
-    allowed = sorted(ALLOWED_IMAGE_EXT | LOG_EXTENSIONS | PACKET_EXTENSIONS)
+    allowed = sorted(
+        ALLOWED_IMAGE_EXT
+        | LOG_EXTENSIONS
+        | COMPRESSED_LOG_EXTENSIONS
+        | ARCHIVE_EXTENSIONS
+        | PACKET_EXTENSIONS
+    )
     return None, (
         "不支持的附件格式。支持图片、PCAP/PCAPNG、常见日志、无后缀文本日志、"
-        "轮转日志及日志压缩包；常规后缀包括: " + ", ".join(allowed)
+        "轮转日志、日志压缩包及 ZIP/RAR 压缩包；常规后缀包括: " + ", ".join(allowed)
     )
+
+
+def validate_attachment(file_storage) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """完整校验单个附件但不落盘，供批量上传在写入前做原子化预检。"""
+    filename = file_storage.filename or "attachment"
+    try:
+        file_storage.seek(0)
+        sample = file_storage.stream.read(FILE_SAMPLE_SIZE)
+        file_storage.seek(0)
+        policy, policy_error = _attachment_policy(filename, sample)
+        if policy_error:
+            return None, policy_error
+
+        total = 0
+        while True:
+            chunk = file_storage.stream.read(COPY_CHUNK_SIZE)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > policy["max_size"]:
+                return None, (
+                    f"{filename} 大小超过限制"
+                    f"（最大 {policy['max_size'] // 1024 // 1024} MB）"
+                )
+        return policy, None
+    except Exception as exc:
+        return None, f"{filename} 校验失败：{exc}"
+    finally:
+        file_storage.seek(0)
 
 
 def _save_stream_with_limit(file_storage, dest: Path, max_size: int) -> Tuple[int, Optional[str]]:
@@ -1514,6 +1597,22 @@ def save_attachment(
     item = get_attachment(att_id)
     _audit("upload_attachment", "attachment", att_id, actor, after=item)
     return item, None
+
+
+def discard_attachment(attachment_id: str) -> bool:
+    """静默清理一次失败的批量上传，不产生误导性的人工删除审计。"""
+    item = get_attachment(attachment_id)
+    if not item:
+        return False
+    full = resolve_file_path(item["rel_path"])
+    with _conn() as conn:
+        conn.execute("DELETE FROM attachments WHERE id = ?", (attachment_id,))
+    if full and full.is_file():
+        try:
+            full.unlink()
+        except OSError:
+            pass
+    return True
 
 
 def save_image(file_storage, actor: str = DEFAULT_ACTOR):

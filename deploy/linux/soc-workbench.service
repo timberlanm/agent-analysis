@@ -1,18 +1,21 @@
 [Unit]
 Description=SOC Incident Analysis Workbench
-After=network-online.target postgresql.service
+After=local-fs.target network-online.target postgresql.service
 Wants=network-online.target
+RequiresMountsFor=__INSTALL_ROOT__
+StartLimitIntervalSec=60
+StartLimitBurst=3
 
 [Service]
 Type=simple
-User=socworkbench
-Group=socworkbench
-WorkingDirectory=/opt/soc-workbench
-EnvironmentFile=/etc/soc-workbench/soc-workbench.env
+User=__SERVICE_USER__
+Group=__SERVICE_USER__
+WorkingDirectory=__INSTALL_ROOT__/current
+EnvironmentFile=__INSTALL_ROOT__/config/soc-workbench.env
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
-ExecStartPre=/opt/soc-workbench/venv/bin/python -c "from backend.database import validate_runtime_database; validate_runtime_database()"
-ExecStart=/opt/soc-workbench/venv/bin/gunicorn --worker-class gthread --workers 2 --threads 8 --bind 0.0.0.0:5000 --timeout 300 --graceful-timeout 30 --keep-alive 5 --access-logfile - --error-logfile - --capture-output wsgi:app
+ExecStartPre=__INSTALL_ROOT__/current/venv/bin/python -c "from backend.database import validate_runtime_database; validate_runtime_database()"
+ExecStart=__INSTALL_ROOT__/current/venv/bin/python -m gunicorn --worker-class gthread --workers 2 --threads 8 --bind 0.0.0.0:5000 --timeout 300 --graceful-timeout 30 --keep-alive 5 --access-logfile - --error-logfile - --capture-output wsgi:app
 Restart=on-failure
 RestartSec=3
 TimeoutStopSec=45

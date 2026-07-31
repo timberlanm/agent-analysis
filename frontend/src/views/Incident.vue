@@ -597,15 +597,6 @@ export default { name: 'Incident' }
           <el-form-item label="上报人" required>
             <el-input v-model="createForm.reporter" placeholder="告警提交或上报人员" />
           </el-form-item>
-          <el-form-item label="告警时间" required>
-            <el-date-picker
-              v-model="createForm.occurred_at"
-              type="datetime"
-              value-format="YYYY-MM-DDTHH:mm:ssZ"
-              placeholder="选择告警发生时间"
-              style="width: 100%"
-            />
-          </el-form-item>
           <el-form-item label="上报时间">
             <el-input :model-value="reportTime ? formatTime(reportTime) : '创建时自动生成'" disabled />
           </el-form-item>
@@ -718,7 +709,7 @@ export default { name: 'Incident' }
                 @paste="handleCreateAttachmentPaste"
               >
                 <el-icon><Upload /></el-icon>
-                <span>{{ createFiles.length ? `继续添加附件（当前 ${createFiles.length} 个）` : '点击选择、拖拽文件到此，或聚焦后 Ctrl+V 粘贴（PCAP/PCAPNG、日志、日志压缩包、图片等）' }}</span>
+                <span>{{ createFiles.length ? `继续添加附件（当前 ${createFiles.length} 个）` : '点击选择、拖拽文件到此，或聚焦后 Ctrl+V 粘贴（PCAP/PCAPNG、日志、ZIP/RAR 压缩包、图片等）' }}</span>
               </div>
               <div v-if="createFiles.length" class="create-file-list">
                 <div
@@ -746,18 +737,18 @@ export default { name: 'Incident' }
           <div class="form-actions span-2">
             <el-button @click="createDialogVisible = false">取消</el-button>
             <template v-if="editingAlertId">
-              <el-button :type="editingStatus === 'new' ? 'default' : 'primary'" :loading="submitting" :disabled="!createForm.title.trim()" @click="submitCreate()">
-                保存
+              <el-button :type="editingStatus === 'new' ? 'default' : 'primary'" :loading="submitting" @click="submitCreate(editingStatus === 'new' ? 'draft' : 'edit')">
+                {{ editingStatus === 'new' ? '保存告警' : '保存' }}
               </el-button>
-              <el-button v-if="editingStatus === 'new'" type="primary" :loading="submitting" :disabled="!createForm.title.trim()" @click="submitCreate('pending')">
-                提交
+              <el-button v-if="editingStatus === 'new'" type="primary" :loading="submitting" @click="submitCreate('submit')">
+                创建告警
               </el-button>
             </template>
             <template v-else>
-              <el-button :loading="submitting" :disabled="!createForm.title.trim()" @click="submitCreate('new')">
-                保存
+              <el-button :loading="submitting" @click="submitCreate('draft')">
+                保存告警
               </el-button>
-              <el-button type="primary" :loading="submitting" :disabled="!createForm.title.trim()" @click="submitCreate()">
+              <el-button type="primary" :loading="submitting" @click="submitCreate('submit')">
                 创建告警
               </el-button>
             </template>
@@ -888,9 +879,11 @@ import {
   updateIncidentSubtask,
   deleteIncidentSubtask,
   updateIncidentAlert,
-  uploadIncidentAttachment
+  uploadIncidentAttachment,
+  uploadIncidentAttachments
 } from '../api'
 import { auth } from '../store/auth'
+import { validateIncidentFiles } from '../utils/incidentFileValidation'
 import { consumeSessionResume } from '../utils/sessionResume'
 import { shouldIgnoreRowClick } from '../utils/tableInteraction'
 
@@ -900,7 +893,7 @@ const hasPerm = (perm) => auth.hasPerm(perm)
 const directoryUsers = ref([])
 
 const statusOptions = [
-  { value: 'new', label: '新建中' },
+  { value: 'new', label: '创建中' },
   { value: 'pending', label: '待分配' },
   { value: 'investigating', label: '研判中' },
   { value: 'responding', label: '应急响应中' },
@@ -1229,7 +1222,7 @@ const canCoordinateSubtasks = computed(() => hasPerm('subtask.manage'))
 const canExecuteSubtask = (subtask) => canCoordinateSubtasks.value || (
   hasPerm('subtask.execute') && subtask?.assignee === currentUser
 )
-// 待分配 / 新建中：尚未进入研判，研判输入只读
+// 待分配 / 创建中：尚未进入研判，研判输入只读
 const researchReadonly = computed(() => ['pending', 'new'].includes(selectedAlert.value?.status))
 
 // 详情弹窗滚动时，顶部头自动缩小、只留上一条/下一条
@@ -1294,7 +1287,6 @@ function newCreateForm() {
     source_system: '',
     alert_type: '',
     severity: '',
-    occurred_at: '',
     source_ip: '',
     destination_ip: '',
     source_port: '',
@@ -1413,7 +1405,8 @@ function attachmentTypeLabel(fileType) {
     pcap: 'PCAP',
     pcapng: 'PCAPNG',
     log: 'LOG',
-    log_archive: '日志归档'
+    log_archive: '日志归档',
+    archive: '压缩包'
   }
   return labels[fileType] || String(fileType || '附件').toUpperCase()
 }
@@ -1716,7 +1709,6 @@ async function openEditAlert(alertOrId) {
   form.source_system = alert.source_system || ''
   form.alert_type = alert.alert_type || ''
   form.severity = alert.severity || 'medium'
-  form.occurred_at = alert.occurred_at || form.occurred_at
   form.description = alert.description || ''
   form.source_ip = nf.source_ip || ''
   form.destination_ip = nf.destination_ip || ''
@@ -1770,28 +1762,44 @@ function handleCreateAttachmentPaste(e) {
   }
 }
 
-function validateCreateForm() {
+async function validateCreateForm({ requireComplete = false } = {}) {
   const f = createForm.value
-  const required = [
-    [f.source_category, '安全设备'],
-    [(f.title || '').trim(), '告警名称'],
-    [(f.source_ip || '').trim(), '攻击 IP'],
-    [(f.destination_ip || '').trim(), '被攻击 IP'],
-    [(f.reporter || '').trim(), '上报人'],
-    [f.occurred_at, '告警时间'],
-    [(f.description || '').trim(), '告警详情'],
-  ]
-  for (const [val, label] of required) {
-    if (!val) { ElMessage.warning(`请填写「${label}」`); return false }
-  }
-  for (const item of visibleOptionalFields.value) {
-    const v = f[item.key]
-    if (v === undefined || v === null || (typeof v === 'string' && !v.trim())) {
-      ElMessage.warning(`请填写「${item.label}」`); return false
+  if (requireComplete) {
+    const required = [
+      [f.source_category, '安全设备'],
+      [(f.title || '').trim(), '告警名称'],
+      [(f.source_ip || '').trim(), '攻击 IP'],
+      [(f.destination_ip || '').trim(), '被攻击 IP'],
+      [(f.reporter || '').trim(), '上报人'],
+      [(f.description || '').trim(), '告警详情'],
+    ]
+    for (const [val, label] of required) {
+      if (!val) { ElMessage.warning(`请填写「${label}」`); return false }
+    }
+    for (const item of visibleOptionalFields.value) {
+      const v = f[item.key]
+      if (v === undefined || v === null || (typeof v === 'string' && !v.trim())) {
+        ElMessage.warning(`请填写「${item.label}」`); return false
+      }
+    }
+    const hasExistingImage = (editOriginal.value?.attachments || [])
+      .some(item => item.file_type === 'image' && item.file_available !== false)
+    const hasNewImage = createScreenshotSlots.value.some(slot => slot.file)
+    if (!hasExistingImage && !hasNewImage) {
+      ElMessage.warning('请至少上传一张告警截图')
+      return false
     }
   }
-  if (!editingAlertId.value && !createScreenshotSlots.value.some(slot => slot.file)) {
-    ElMessage.warning('请至少上传一张告警截图')
+
+  const selectedFiles = [
+    ...createScreenshotSlots.value
+      .filter(slot => slot.file)
+      .map(slot => ({ file: slot.file, screenshot: true })),
+    ...createFiles.value.map(file => ({ file, screenshot: false })),
+  ]
+  const fileError = await validateIncidentFiles(selectedFiles)
+  if (fileError) {
+    ElMessage.warning(fileError)
     return false
   }
   return true
@@ -1810,8 +1818,27 @@ function substantiveEditChanged(orig) {
   return false
 }
 
-async function submitCreate(status = '') {
-  if (!validateCreateForm()) return
+function clearUploadedCreateFiles(uploaded = []) {
+  for (const slot of createScreenshotSlots.value) {
+    if (slot.previewUrl) URL.revokeObjectURL(slot.previewUrl)
+  }
+  createScreenshotSlots.value = [newScreenshotSlot()]
+  createFiles.value = []
+  if (editOriginal.value) {
+    editOriginal.value = {
+      ...editOriginal.value,
+      attachments: [
+        ...(editOriginal.value.attachments || []),
+        ...uploaded,
+      ],
+    }
+  }
+}
+
+async function submitCreate(action = 'edit') {
+  const savingDraft = action === 'draft'
+  const formallySubmitting = action === 'submit'
+  if (!await validateCreateForm({ requireComplete: formallySubmitting })) return
   const isEditing = !!editingAlertId.value
   const wasStatus = editingStatus.value
   const orig = editOriginal.value
@@ -1819,28 +1846,48 @@ async function submitCreate(status = '') {
   submitting.value = true
   try {
     const payload = { ...createForm.value, raw_text: createForm.value.description }
-    if (status) payload.status = status
     let alert
     if (isEditing) {
+      if (editingStatus.value === 'new') payload.submission_mode = 'draft'
       const res = await updateIncidentAlert(editingAlertId.value, payload)
       if (!res.success) throw new Error(res.error || '保存失败')
       alert = res.data
     } else {
+      // 新告警始终先落为草稿；附件成功后才允许正式切换到“待分配”。
+      payload.submission_mode = 'draft'
       const res = await createIncidentAlert(payload)
       if (!res.success) throw new Error(res.error || '创建失败')
       alert = res.data
+      editingAlertId.value = alert.id
+      editingStatus.value = 'new'
+      editOriginal.value = alert
     }
-    for (const slot of createScreenshotSlots.value) {
-      if (slot.file) await uploadIncidentAttachment(alert.id, slot.file)
+
+    const files = [
+      ...createScreenshotSlots.value.filter(slot => slot.file).map(slot => slot.file),
+      ...createFiles.value,
+    ]
+    if (files.length) {
+      const upload = await uploadIncidentAttachments(alert.id, files)
+      const uploaded = upload.data?.attachments || []
+      alert = {
+        ...alert,
+        attachments: [...(alert.attachments || []), ...uploaded],
+      }
+      clearUploadedCreateFiles(uploaded)
     }
-    for (const file of createFiles.value) {
-      await uploadIncidentAttachment(alert.id, file)
+
+    if (formallySubmitting) {
+      const finalized = await updateIncidentAlert(alert.id, { submission_mode: 'submit' })
+      if (!finalized.success) throw new Error(finalized.error || '正式创建失败')
+      alert = finalized.data
     }
+
     createDialogVisible.value = false
     editingAlertId.value = null
-    if (status === 'pending') ElMessage.success('已提交，告警状态：待分配')
-    else if (status === 'new') ElMessage.success('已保存，告警状态：新建中')
-    else ElMessage.success(isEditing ? '已保存' : '告警已创建')
+    if (formallySubmitting) ElMessage.success('告警已创建，状态：待分配')
+    else if (savingDraft) ElMessage.success('告警已保存，状态：创建中')
+    else ElMessage.success('已保存')
     await refreshAll()
     await selectAlert(alert)
     // Step 2：已完成 + 有结论 的告警，编辑了关键信息 -> 提示是否重新研判

@@ -105,6 +105,97 @@ def test_alert_number_is_unique_and_searchable(rbac):
     assert first_id in {item["id"] for item in partial}
 
 
+def test_draft_requires_complete_content_and_screenshot_before_submission(rbac):
+    rbac.create_user("root", ["admin"])
+    root = rbac.login("root")
+
+    draft_response = root.post(
+        "/api/incident/alerts",
+        json={"submission_mode": "draft", "title": ""},
+    )
+    assert draft_response.status_code == 200, draft_response.get_json()
+    draft = draft_response.get_json()["data"]
+    assert draft["status"] == "new"
+
+    incomplete = root.put(
+        f"/api/incident/alerts/{draft['id']}",
+        json={"submission_mode": "submit"},
+    )
+    assert incomplete.status_code == 400
+    assert "正式创建前请补全" in incomplete.get_json()["error"]
+    assert isvc.get_alert(draft["id"])["status"] == "new"
+
+    saved = root.put(
+        f"/api/incident/alerts/{draft['id']}",
+        json={
+            "submission_mode": "draft",
+            "title": "完整告警",
+            "source_category": "edr",
+            "source_ip": "192.0.2.10",
+            "destination_ip": "198.51.100.20",
+            "event_action": "阻断",
+            "description": "发现可疑网络连接",
+        },
+    )
+    assert saved.status_code == 200, saved.get_json()
+    assert saved.get_json()["data"]["status"] == "new"
+    assert saved.get_json()["data"]["occurred_at"]
+    assert saved.get_json()["data"]["normalized_fields"]["event_action"] == "阻断"
+
+    screenshot = root.post(
+        f"/api/incident/alerts/{draft['id']}/attachments",
+        data={"file": (io.BytesIO(b"\x89PNG\r\n\x1a\n"), "alert.png")},
+        content_type="multipart/form-data",
+    )
+    assert screenshot.status_code == 200, screenshot.get_json()
+
+    submitted = root.put(
+        f"/api/incident/alerts/{draft['id']}",
+        json={"submission_mode": "submit"},
+    )
+    assert submitted.status_code == 200, submitted.get_json()
+    assert submitted.get_json()["data"]["status"] == "pending"
+
+
+def test_zip_and_rar_archives_are_supported(rbac):
+    rbac.create_user("root", ["admin"])
+    root = rbac.login("root")
+    alert_id = _new_alert(root, "压缩附件验证")
+
+    for filename, content in [
+        ("forensics.zip", b"PK\x03\x04archive"),
+        ("evidence.rar", b"Rar!\x1a\x07\x01\x00archive"),
+    ]:
+        response = root.post(
+            f"/api/incident/alerts/{alert_id}/attachments",
+            data={"file": (io.BytesIO(content), filename)},
+            content_type="multipart/form-data",
+        )
+        assert response.status_code == 200, response.get_json()
+        item = response.get_json()["data"]["attachments"][0]
+        assert item["file_type"] == "archive"
+        assert item["rel_path"].startswith("archives/")
+
+
+def test_batch_attachment_validation_does_not_partially_save(rbac):
+    rbac.create_user("root", ["admin"])
+    root = rbac.login("root")
+    alert_id = _new_alert(root, "批量附件原子预检")
+
+    response = root.post(
+        f"/api/incident/alerts/{alert_id}/attachments",
+        data={
+            "file": [
+                (io.BytesIO(b"valid log\n"), "access.log"),
+                (io.BytesIO(b"not allowed"), "payload.exe"),
+            ]
+        },
+        content_type="multipart/form-data",
+    )
+    assert response.status_code == 400
+    assert isvc.list_attachments(alert_id) == []
+
+
 def test_assigned_responder_can_download_attachment(rbac):
     rbac.create_user("root", ["admin"])
     rbac.create_user("resp", ["responder"])

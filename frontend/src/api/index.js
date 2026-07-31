@@ -197,9 +197,9 @@ export async function exportIncidentOperationsCsv(days = 7) {
   return text
 }
 
-export async function uploadIncidentAttachment(alertId, file, description = '') {
+export async function uploadIncidentAttachments(alertId, files, description = '') {
   const form = new FormData()
-  form.append('file', file)
+  for (const file of files) form.append('file', file)
   if (description) form.append('description', description)
   const resp = await fetch(apiUrl(`/incident/alerts/${alertId}/attachments`), {
     method: 'POST', body: form, credentials: 'include', headers: csrfHeaders(),
@@ -207,6 +207,9 @@ export async function uploadIncidentAttachment(alertId, file, description = '') 
   const data = await resp.json()
   if (!resp.ok) throw new Error(data.error || '上传失败')
   return data
+}
+export async function uploadIncidentAttachment(alertId, file, description = '') {
+  return uploadIncidentAttachments(alertId, [file], description)
 }
 export async function downloadIncidentAttachment(attachment) {
   if (!attachment?.url) throw new Error('附件下载地址不存在')
